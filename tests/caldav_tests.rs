@@ -683,6 +683,45 @@ END:VCALENDAR"
         assert!(body_str.contains("Test Event"));
     }
 
+    // LocalFs rather than MemFs: MemFs::create_dir happily "creates" the root.
+    #[cfg(feature = "localfs")]
+    #[tokio::test]
+    async fn test_mkcalendar_on_prefixed_root_is_rejected_without_panic() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let dir = std::env::temp_dir().join(format!(
+            "dav-mkcalendar-root-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let server = DavHandler::builder()
+            .filesystem(dav_server::localfs::LocalFs::new(&dir, true, false, false))
+            .locksystem(FakeLs::new())
+            .strip_prefix("/dav")
+            .build_handler();
+
+        // The parent of the target is looked up before create_dir rejects
+        // the root; this used to panic on the prefixed root.
+        for uri in ["/dav/", "/dav"] {
+            let req = Request::builder()
+                .method("MKCALENDAR")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let resp = server.handle(req).await;
+            assert!(
+                resp.status().is_client_error(),
+                "MKCALENDAR {uri}: {}",
+                resp.status()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn test_calendar_query_report_hrefs_include_strip_prefix() {
         let server = DavHandler::builder()

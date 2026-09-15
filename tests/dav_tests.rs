@@ -3128,6 +3128,50 @@ mod get_delete_copymove_tests {
             "b"
         );
     }
+
+    #[tokio::test]
+    async fn copy_move_to_prefixed_root_does_not_panic() {
+        let server = DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .strip_prefix("/dav")
+            .build_handler();
+        assert_eq!(
+            put(&server, "/dav/a.txt", "alpha").await,
+            StatusCode::CREATED
+        );
+
+        // The prefixed server must answer COPY/MOVE onto its root the same
+        // way a server without a prefix does, instead of panicking while
+        // computing the destination's parent.
+        let plain = setup();
+        assert_eq!(put(&plain, "/a.txt", "alpha").await, StatusCode::CREATED);
+        let copy_status = copy(&plain, "/a.txt", "/", None, None).await;
+        let _ = put(&plain, "/a.txt", "alpha").await;
+        let move_status = move_(&plain, "/a.txt", "/", None, None).await;
+
+        for dest in ["/dav/", "/dav"] {
+            let status = copy(&server, "/dav/a.txt", dest, None, None).await;
+            assert_eq!(status, copy_status, "COPY to {dest}");
+            let _ = put(&server, "/dav/a.txt", "alpha").await;
+            let status = move_(&server, "/dav/a.txt", dest, None, None).await;
+            assert_eq!(status, move_status, "MOVE to {dest}");
+            let _ = put(&server, "/dav/a.txt", "alpha").await;
+        }
+
+        // The root itself is still there.
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PROPFIND")
+                    .uri("/dav/")
+                    .header("Depth", "0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+    }
 }
 
 #[cfg(feature = "memfs")]

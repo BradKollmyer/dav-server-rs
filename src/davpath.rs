@@ -289,20 +289,27 @@ impl DavPath {
     }
 
     /// Return the parent directory.
+    ///
+    /// The parent of the root (after stripping the prefix) is the root itself,
+    /// so the result never loses the prefix or the leading slash.
     pub fn parent(&self) -> DavPath {
-        let mut segs = self
-            .fullpath
+        let pfxlen = self.pfxlen.unwrap_or(0);
+        let mut segs = self.fullpath[pfxlen..]
             .split(|&c| c == b'/')
             .filter(|e| !e.is_empty())
             .collect::<Vec<&[u8]>>();
-        segs.pop();
-        if !segs.is_empty() {
-            segs.push(b"");
+        if segs.pop().is_none() {
+            return self.clone();
         }
-        segs.insert(0, b"");
+        let mut fullpath = self.fullpath[..pfxlen].to_vec();
+        fullpath.push(b'/');
+        for seg in segs {
+            fullpath.extend_from_slice(seg);
+            fullpath.push(b'/');
+        }
         DavPath {
             pfxlen: self.pfxlen,
-            fullpath: segs.join(&b'/').to_vec(),
+            fullpath,
         }
     }
 
@@ -505,5 +512,47 @@ mod tests {
             p.set_prefix("/dav").unwrap();
             assert_eq!(p.as_bytes(), stripped.as_bytes(), "{path}");
         }
+    }
+
+    #[test]
+    fn parent_of_root_is_root() {
+        let p = DavPath::new("/").unwrap().parent();
+        assert_eq!(p.as_bytes(), b"/");
+        assert_eq!(p.with_prefix().as_bytes(), b"/");
+    }
+
+    #[test]
+    fn parent_of_prefixed_root_is_prefixed_root() {
+        let p = DavPath::from_str_and_prefix("/dav/", "/dav")
+            .unwrap()
+            .parent();
+        assert_eq!(p.as_bytes(), b"/");
+        assert_eq!(p.with_prefix().as_bytes(), b"/dav/");
+        assert_eq!(p.prefix(), "/dav");
+
+        // A prefix without trailing slash is normalized to a root of "/dav/".
+        let p = DavPath::from_str_and_prefix("/dav", "/dav")
+            .unwrap()
+            .parent();
+        assert_eq!(p.as_bytes(), b"/");
+        assert_eq!(p.with_prefix().as_bytes(), b"/dav/");
+    }
+
+    #[test]
+    fn parent_of_prefixed_path_keeps_prefix() {
+        let p = DavPath::from_str_and_prefix("/dav/a", "/dav")
+            .unwrap()
+            .parent();
+        assert_eq!(p.as_bytes(), b"/");
+        assert_eq!(p.with_prefix().as_bytes(), b"/dav/");
+
+        let p = DavPath::from_str_and_prefix("/dav/a/b/", "/dav")
+            .unwrap()
+            .parent();
+        assert_eq!(p.as_bytes(), b"/a/");
+        assert_eq!(p.with_prefix().as_bytes(), b"/dav/a/");
+
+        let p = DavPath::new("/a/b").unwrap().parent();
+        assert_eq!(p.as_bytes(), b"/a/");
     }
 }
