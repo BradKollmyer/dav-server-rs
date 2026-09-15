@@ -45,6 +45,52 @@ mod carddav_tests {
     }
 
     #[tokio::test]
+    async fn test_extended_mkcol_creates_addressbook() {
+        let server = setup_carddav_server();
+
+        let body = r#"<?xml version="1.0" encoding="utf-8"?>
+<D:mkcol xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
+  <D:set>
+    <D:prop>
+      <D:resourcetype>
+        <D:collection/>
+        <CARD:addressbook/>
+      </D:resourcetype>
+    </D:prop>
+  </D:set>
+</D:mkcol>"#;
+
+        let req = Request::builder()
+            .method("MKCOL")
+            .uri("/contacts")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
+  <D:prop>
+    <D:resourcetype/>
+  </D:prop>
+</D:propfind>"#;
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/contacts")
+            .header("Depth", "0")
+            .body(Body::from(propfind_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("<CARD:addressbook"),
+            "extended MKCOL must create an addressbook: {body_str}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_mkaddressbook() {
         let server = setup_carddav_server();
 

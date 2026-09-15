@@ -720,7 +720,8 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     }
 
     /// Apply DAV:set / DAV:prop children as dead properties (PROPPATCH path).
-    #[cfg(all(feature = "caldav", feature = "proppatch"))]
+    /// `resourcetype` is applied via mark_calendar / mark_addressbook, not as a dead prop.
+    #[cfg(feature = "proppatch")]
     pub(crate) async fn apply_set_props(&self, path: &DavPath, tree: &Element) -> DavResult<()> {
         let can_deadprop = self.fs.have_props(path, &self.credentials).await;
         if !can_deadprop {
@@ -735,6 +736,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     .filter(|e| e.name == "prop")
                     .flat_map(|e| e.child_elems_iter())
             })
+            .filter(|n| n.name != "resourcetype")
             .collect();
 
         let mut patch = Vec::new();

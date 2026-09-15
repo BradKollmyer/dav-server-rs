@@ -138,6 +138,13 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             Some(tree)
         };
 
+        let parent = path.parent();
+        if let Ok(meta) = self.fs.metadata(&parent, &self.credentials).await
+            && meta.is_calendar(&parent)
+        {
+            return Err(DavError::Status(StatusCode::FORBIDDEN));
+        }
+
         match self.fs.create_dir(&path, &self.credentials).await {
             Err(FsError::Exists) => return Err(DavError::Status(StatusCode::METHOD_NOT_ALLOWED)),
             Err(FsError::NotFound) => return Err(DavError::Status(StatusCode::CONFLICT)),

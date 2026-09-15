@@ -60,11 +60,16 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         body: &[u8],
     ) -> DavResult<Response<Body>> {
         let set_props = parse_mkcol_or_mkaddressbook_set_props(body)?;
-        let resp = self.handle_mkcol(req).await?;
-        self.fs
-            .mark_addressbook(&self.path(req), &self.credentials)
-            .await?;
-        self.apply_mkcol_set_props(&self.path(req), set_props).await;
+        let path = self.path(req);
+        let parent = path.parent();
+        if let Ok(meta) = self.fs.metadata(&parent, &self.credentials).await
+            && meta.is_addressbook(&parent)
+        {
+            return Err(DavError::Status(StatusCode::FORBIDDEN));
+        }
+        let resp = self.handle_mkcol(req, &[]).await?;
+        self.fs.mark_addressbook(&path, &self.credentials).await?;
+        self.apply_mkcol_set_props(&path, set_props).await;
         Ok(resp)
     }
 

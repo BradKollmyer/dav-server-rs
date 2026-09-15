@@ -212,6 +212,19 @@ END:VCALENDAR"
     }
 
     #[tokio::test]
+    async fn test_mkcol_garbage_body_is_bad_request() {
+        let server = setup_caldav_server();
+
+        let req = Request::builder()
+            .method("MKCOL")
+            .uri("/garbage-col")
+            .body(Body::from("this is not xml"))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn test_mkcalendar_already_exists() {
         // First create a regular collection
         let server = setup_caldav_server2().await;
