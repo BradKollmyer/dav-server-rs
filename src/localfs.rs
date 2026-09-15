@@ -1013,6 +1013,18 @@ impl DavFile for LocalFsFile {
     }
 }
 
+/// Convert a Windows FILETIME (100-ns ticks since 1601-01-01) to SystemTime.
+#[cfg(any(windows, test))]
+fn filetime_to_systemtime(ticks: u64) -> SystemTime {
+    const UNIX_EPOCH_FILETIME: u64 = 116444736000000000;
+    UNIX_EPOCH
+        + Duration::from_nanos(
+            ticks
+                .saturating_sub(UNIX_EPOCH_FILETIME)
+                .saturating_mul(100),
+        )
+}
+
 impl DavMetaData for LocalFsMetaData {
     fn len(&self) -> u64 {
         self.0.len()
@@ -1034,7 +1046,7 @@ impl DavMetaData for LocalFsMetaData {
 
     #[cfg(windows)]
     fn status_changed(&self) -> FsResult<SystemTime> {
-        Ok(UNIX_EPOCH + Duration::from_nanos(self.0.creation_time() - 116444736000000000))
+        Ok(filetime_to_systemtime(self.0.creation_time()))
     }
 
     fn is_dir(&self) -> bool {
@@ -1105,6 +1117,30 @@ impl DavMetaData for LocalFsMetaData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filetime_unix_epoch() {
+        assert_eq!(filetime_to_systemtime(116444736000000000), UNIX_EPOCH);
+    }
+
+    #[test]
+    fn filetime_before_unix_epoch_saturates() {
+        assert_eq!(filetime_to_systemtime(0), UNIX_EPOCH);
+        assert_eq!(filetime_to_systemtime(116444736000000000 - 1), UNIX_EPOCH);
+    }
+
+    #[test]
+    fn filetime_scales_100ns_ticks() {
+        // One FILETIME tick is 100 ns; 10_000_000 ticks is one second.
+        assert_eq!(
+            filetime_to_systemtime(116444736000000000 + 1),
+            UNIX_EPOCH + Duration::from_nanos(100)
+        );
+        assert_eq!(
+            filetime_to_systemtime(116444736000000000 + 10_000_000),
+            UNIX_EPOCH + Duration::from_secs(1)
+        );
+    }
 
     #[test]
     fn join_normal_relative_segments() {
