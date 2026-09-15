@@ -396,66 +396,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     }
 
     fn matches_addressbook_query(&self, content: &str, query: &AddressBookQuery) -> bool {
-        // Simple implementation - a full implementation would parse the vCard
-        // and apply all the filters properly
-
-        if let Some(ref prop_filter) = query.prop_filter {
-            if prop_filter.is_not_defined {
-                // Check if the property is NOT defined
-                let prop_name = format!("{}:", prop_filter.name.to_uppercase());
-                if content.contains(&prop_name) {
-                    return false;
-                }
-            } else if let Some(ref text_match) = prop_filter.text_match {
-                // Check for text match
-                let search_text = if text_match.negate_condition {
-                    // Negate condition - return true if text is NOT found
-                    !self.text_matches(content, &text_match.text, text_match.match_type.as_deref())
-                } else {
-                    self.text_matches(content, &text_match.text, text_match.match_type.as_deref())
-                };
-                return search_text;
-            }
-        }
-
-        true
-    }
-
-    fn text_matches(&self, content: &str, search: &str, match_type: Option<&str>) -> bool {
-        let content_lower = content.to_lowercase();
-        let search_lower = search.to_lowercase();
-
-        match match_type {
-            Some("equals") => content_lower.contains(&format!(":{}", search_lower)),
-            Some("starts-with") => {
-                // Check if any property value starts with the search text
-                for line in content.lines() {
-                    if let Some(pos) = line.find(':') {
-                        let value = &line[pos + 1..];
-                        if value.to_lowercase().starts_with(&search_lower) {
-                            return true;
-                        }
-                    }
-                }
-                false
-            }
-            Some("ends-with") => {
-                // Check if any property value ends with the search text
-                for line in content.lines() {
-                    if let Some(pos) = line.find(':') {
-                        let value = &line[pos + 1..];
-                        if value.to_lowercase().ends_with(&search_lower) {
-                            return true;
-                        }
-                    }
-                }
-                false
-            }
-            _ => {
-                // Default: contains
-                content_lower.contains(&search_lower)
-            }
-        }
+        addressbook_matches_query(content, query)
     }
 
     #[cfg(feature = "carddav")]

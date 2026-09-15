@@ -5,7 +5,7 @@
 //! using the vCard format.
 
 #[cfg(feature = "carddav")]
-use calcard::vcard::VCard;
+use calcard::vcard::{VCard, VCardValue};
 use xmltree::Element;
 
 use crate::davpath::DavPath;
@@ -131,6 +131,74 @@ pub fn is_vcard_data(content: &[u8]) -> bool {
     trimmed.ends_with(b"END:VCARD")
 }
 
+/// Evaluate an `addressbook-query` filter against vCard text.
+///
+/// Unparseable data does not match (the REPORT skips that resource).
+/// `param-filter` is ignored; matching is property-scoped `text-match` only.
+#[cfg(feature = "carddav")]
+pub(crate) fn addressbook_matches_query(content: &str, query: &AddressBookQuery) -> bool {
+    let Some(pf) = query.prop_filter.as_ref() else {
+        return true;
+    };
+    let Ok(vcard) = validate_vcard_data(content) else {
+        return false;
+    };
+    vcard_matches_prop_filter(&vcard, pf)
+}
+
+#[cfg(feature = "carddav")]
+fn vcard_matches_prop_filter(vcard: &VCard, pf: &PropertyFilter) -> bool {
+    let values: Vec<String> = vcard
+        .entries
+        .iter()
+        .filter(|e| e.name.as_str().eq_ignore_ascii_case(&pf.name))
+        .flat_map(|e| e.values.iter().filter_map(vcard_value_text))
+        .collect();
+    if pf.is_not_defined {
+        return values.is_empty();
+    }
+    if values.is_empty() {
+        return false;
+    }
+    match &pf.text_match {
+        Some(tm) => {
+            let any = values.iter().any(|v| text_matches_core(v, tm));
+            if tm.negate_condition { !any } else { any }
+        }
+        None => true,
+    }
+}
+
+#[cfg(feature = "carddav")]
+fn vcard_value_text(value: &VCardValue) -> Option<String> {
+    match value {
+        VCardValue::Text(s) => Some(s.clone()),
+        VCardValue::Integer(i) => Some(i.to_string()),
+        VCardValue::Float(f) => Some(f.to_string()),
+        VCardValue::Boolean(b) => Some(b.to_string()),
+        VCardValue::Component(parts) => Some(parts.join(";")),
+        other => other.as_text().map(str::to_string),
+    }
+}
+
+#[cfg(feature = "carddav")]
+fn text_matches_core(value: &str, tm: &TextMatch) -> bool {
+    let case_insensitive = tm.collation.as_deref().is_none_or(|c| {
+        c.eq_ignore_ascii_case("i;ascii-casemap") || c.eq_ignore_ascii_case("i;unicode-casemap")
+    });
+    let (haystack, needle) = if case_insensitive {
+        (value.to_lowercase(), tm.text.to_lowercase())
+    } else {
+        (value.to_string(), tm.text.clone())
+    };
+    match tm.match_type.as_deref() {
+        Some("equals") => haystack == needle,
+        Some("starts-with") => haystack.starts_with(&needle),
+        Some("ends-with") => haystack.ends_with(&needle),
+        _ => haystack.contains(&needle),
+    }
+}
+
 /// Validate vCard data using the calcard crate
 ///
 /// This function validates that the content is a well-formed vCard.
@@ -234,5 +302,67 @@ fn extract_vcard_property_value(line: &str, property_name: &str) -> Option<Strin
         Some(value.to_string())
     } else {
         None
+    }
+}
+
+#[cfg(all(test, feature = "carddav"))]
+mod tests {
+    use super::*;
+
+    fn email_query(text: &str, match_type: &str, negate: bool) -> AddressBookQuery {
+        AddressBookQuery {
+            prop_filter: Some(PropertyFilter {
+                name: "EMAIL".into(),
+                is_not_defined: false,
+                text_match: Some(TextMatch {
+                    text: text.into(),
+                    collation: Some("i;unicode-casemap".into()),
+                    negate_condition: negate,
+                    match_type: Some(match_type.into()),
+                }),
+                param_filters: Vec::new(),
+            }),
+            properties: Vec::new(),
+            limit: None,
+        }
+    }
+
+    #[test]
+    fn unparseable_vcard_does_not_match() {
+        assert!(!addressbook_matches_query(
+            "BEGIN:VCARD\nNOT VALID\nEND:VCARD",
+            &email_query("John", "contains", false)
+        ));
+    }
+
+    #[test]
+    fn email_text_match_ignores_fn() {
+        let query = email_query("John", "contains", false);
+        let fn_only = "BEGIN:VCARD\nVERSION:3.0\nFN:John Doe\nN:Doe;John;;;\nEND:VCARD";
+        let email_john =
+            "BEGIN:VCARD\nVERSION:3.0\nFN:Jane Smith\nEMAIL:john@example.com\nEND:VCARD";
+        assert!(!addressbook_matches_query(fn_only, &query));
+        assert!(addressbook_matches_query(email_john, &query));
+    }
+
+    #[test]
+    fn text_match_types_and_negate() {
+        let vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Jane Smith\nEMAIL:john@example.com\nEND:VCARD";
+        assert!(addressbook_matches_query(
+            vcard,
+            &email_query("john@example.com", "equals", false)
+        ));
+        assert!(addressbook_matches_query(
+            vcard,
+            &email_query("john@", "starts-with", false)
+        ));
+        assert!(addressbook_matches_query(
+            vcard,
+            &email_query(".com", "ends-with", false)
+        ));
+        assert!(!addressbook_matches_query(
+            vcard,
+            &email_query("John", "contains", true)
+        ));
     }
 }

@@ -240,6 +240,86 @@ END:VCARD"#;
     }
 
     #[tokio::test]
+    async fn test_addressbook_query_email_text_match_ignores_fn() {
+        let server = setup_carddav_server();
+
+        let req = Request::builder()
+            .method("MKADDRESSBOOK")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::empty())
+            .unwrap();
+        let _ = server.handle(req).await;
+
+        let fn_john = r#"BEGIN:VCARD
+VERSION:3.0
+UID:fn-john@example.com
+FN:John Doe
+N:Doe;John;;;
+EMAIL:jane.doe@example.com
+END:VCARD"#;
+
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/addressbooks/my-contacts/fn-john.vcf")
+            .header("Content-Type", "text/vcard")
+            .body(Body::from(fn_john))
+            .unwrap();
+        let _ = server.handle(req).await;
+
+        let email_john = r#"BEGIN:VCARD
+VERSION:3.0
+UID:email-john@example.com
+FN:Jane Smith
+N:Smith;Jane;;;
+EMAIL:john.smith@example.com
+END:VCARD"#;
+
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/addressbooks/my-contacts/email-john.vcf")
+            .header("Content-Type", "text/vcard")
+            .body(Body::from(email_john))
+            .unwrap();
+        let _ = server.handle(req).await;
+
+        let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<CARD:addressbook-query xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
+  <D:prop>
+    <CARD:address-data/>
+  </D:prop>
+  <CARD:filter>
+    <CARD:prop-filter name="EMAIL">
+      <CARD:text-match collation="i;unicode-casemap" match-type="contains">John</CARD:text-match>
+    </CARD:prop-filter>
+  </CARD:filter>
+</CARD:addressbook-query>"#;
+
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/addressbooks/my-contacts")
+            .header("Depth", "1")
+            .body(Body::from(report_body))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("Jane Smith"),
+            "EMAIL match missing: {body_str}"
+        );
+        assert!(
+            !body_str.contains("John Doe"),
+            "FN-only card must not match EMAIL text-match: {body_str}"
+        );
+        assert!(
+            body_str.contains("john.smith@example.com"),
+            "matching EMAIL missing: {body_str}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_addressbook_multiget_report() {
         let server = setup_carddav_server();
 
