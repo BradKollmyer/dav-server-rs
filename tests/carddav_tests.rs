@@ -171,7 +171,7 @@ mod carddav_tests {
     async fn test_addressbook_home_set() {
         let server = setup_carddav_server();
 
-        // PROPFIND request for addressbook-home-set on /addressbooks/
+        // PROPFIND request for addressbook-home-set on / (principal unset)
         let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
 <D:propfind xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
   <D:prop>
@@ -181,7 +181,7 @@ mod carddav_tests {
 
         let req = Request::builder()
             .method("PROPFIND")
-            .uri("/addressbooks/")
+            .uri("/")
             .header("Depth", "0")
             .body(Body::from(propfind_body))
             .unwrap();

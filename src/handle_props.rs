@@ -831,6 +831,17 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
         self.tx = Some(tx)
     }
 
+    /// Home-set lives on the configured principal, or `/` if principal is unset.
+    #[cfg(any(feature = "caldav", feature = "carddav"))]
+    fn is_principal_resource(&self, path: &DavPath) -> bool {
+        let path = path.to_string();
+        let path = path.trim_end_matches('/');
+        match self.principal.as_deref() {
+            Some(pr) => path == pr.trim_end_matches('/'),
+            None => path.is_empty(),
+        }
+    }
+
     fn build_elem<T>(
         &self,
         content: bool,
@@ -1012,17 +1023,23 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                         });
                     }
                     "current-user-principal" => {
-                        if let Some(pr) = &self.principal {
-                            let mut elem = prop.clone();
-                            let mut principal_href = Element::new2("D:href");
-                            principal_href = principal_href.text(pr.clone());
-                            elem.children
-                                .push(xmltree::XMLNode::Element(principal_href));
-                            return Ok(StatusElement {
-                                status: StatusCode::OK,
-                                element: elem,
-                            });
+                        let mut elem = prop.clone();
+                        if docontent {
+                            if let Some(pr) = &self.principal {
+                                let mut principal_href = Element::new2("D:href");
+                                principal_href = principal_href.text(pr.clone());
+                                elem.children
+                                    .push(xmltree::XMLNode::Element(principal_href));
+                            } else {
+                                elem.children.push(xmltree::XMLNode::Element(Element::new2(
+                                    "D:unauthenticated",
+                                )));
+                            }
                         }
+                        return Ok(StatusElement {
+                            status: StatusCode::OK,
+                            element: elem,
+                        });
                     }
                     "supportedlock" => {
                         return Ok(StatusElement {
@@ -1069,7 +1086,15 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
             Some(NS_CALDAV_URI) => {
                 pfx = "C";
 
-                if meta.is_calendar(path) {
+                // RFC 4791 6.2.1: calendar-home-set is defined on the principal.
+                if prop.name.as_str() == "calendar-home-set" && self.is_principal_resource(path) {
+                    let elem =
+                        create_calendar_home_set(path.prefix(), DEFAULT_CALDAV_DIRECTORY_ENDSLASH);
+                    return Ok(StatusElement {
+                        status: StatusCode::OK,
+                        element: elem,
+                    });
+                } else if meta.is_calendar(path) {
                     match prop.name.as_str() {
                         "supported-calendar-component-set" => {
                             let components = vec![
@@ -1128,7 +1153,18 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
             Some(NS_CARDDAV_URI) => {
                 pfx = "CARD";
 
-                if meta.is_addressbook(path) {
+                // RFC 6352 6.2.3: addressbook-home-set is defined on the principal.
+                if prop.name.as_str() == "addressbook-home-set" && self.is_principal_resource(path)
+                {
+                    let elem = create_addressbook_home_set(
+                        path.prefix(),
+                        DEFAULT_CARDDAV_DIRECTORY_ENDSLASH,
+                    );
+                    return Ok(StatusElement {
+                        status: StatusCode::OK,
+                        element: elem,
+                    });
+                } else if meta.is_addressbook(path) {
                     match prop.name.as_str() {
                         "supported-address-data" => {
                             let elem = create_supported_address_data();
@@ -1266,30 +1302,6 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
             }
         }
         self.q_cache = qc;
-
-        #[cfg(feature = "caldav")]
-        {
-            let path_string = path.to_string();
-            if path_string == DEFAULT_CALDAV_DIRECTORY
-                || path_string == DEFAULT_CALDAV_DIRECTORY_ENDSLASH
-            {
-                let elem =
-                    create_calendar_home_set(path.prefix(), DEFAULT_CALDAV_DIRECTORY_ENDSLASH);
-                add_sc_elem(&mut props, StatusCode::OK, elem);
-            }
-        }
-
-        #[cfg(feature = "carddav")]
-        {
-            let path_string = path.to_string();
-            if path_string == DEFAULT_CARDDAV_DIRECTORY
-                || path_string == DEFAULT_CARDDAV_DIRECTORY_ENDSLASH
-            {
-                let elem =
-                    create_addressbook_home_set(path.prefix(), DEFAULT_CARDDAV_DIRECTORY_ENDSLASH);
-                add_sc_elem(&mut props, StatusCode::OK, elem);
-            }
-        }
 
         // Dead properties: allprop includes values, propname includes names.
         // Named props in a specific `prop` request are fetched via build_prop.

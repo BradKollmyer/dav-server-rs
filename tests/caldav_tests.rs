@@ -707,6 +707,144 @@ END:VCALENDAR"#;
         let resp = server.handle(req).await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT); // For an update, it should be NO_CONTENT
     }
+
+    #[tokio::test]
+    async fn test_current_user_principal_without_principal() {
+        let server = setup_caldav_server();
+
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:current-user-principal/>
+  </D:prop>
+</D:propfind>"#;
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/")
+            .header("Depth", "0")
+            .body(Body::from(propfind_body))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("current-user-principal"),
+            "missing current-user-principal: {body_str}"
+        );
+        assert!(
+            body_str.contains("unauthenticated") || body_str.contains("href"),
+            "expected unauthenticated or href, not a 404 miss: {body_str}"
+        );
+        assert!(
+            body_str.contains("HTTP/1.1 200"),
+            "current-user-principal should be 200: {body_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_calendars_specific_propfind_omits_home_set() {
+        let server = setup_caldav_server();
+
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:getcontentlength/>
+  </D:prop>
+</D:propfind>"#;
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/calendars")
+            .header("Depth", "0")
+            .body(Body::from(propfind_body))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            !body_str.contains("calendar-home-set"),
+            "specific-prop PROPFIND must not inject calendar-home-set: {body_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_calendar_home_set_on_principal() {
+        let server = DavHandler::builder()
+            .filesystem(dav_server::memfs::MemFs::new())
+            .locksystem(FakeLs::new())
+            .principal("/principals/me")
+            .build_handler();
+
+        for uri in ["/principals", "/principals/me"] {
+            let req = Request::builder()
+                .method("MKCOL")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let resp = server.handle(req).await;
+            assert_eq!(resp.status(), StatusCode::CREATED);
+        }
+
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-home-set/>
+  </D:prop>
+</D:propfind>"#;
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/principals/me")
+            .header("Depth", "0")
+            .body(Body::from(propfind_body))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("calendar-home-set"),
+            "missing calendar-home-set: {body_str}"
+        );
+        assert!(
+            body_str.contains("/calendars/"),
+            "missing /calendars/ href: {body_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_calendar_home_set_on_root_without_principal() {
+        let server = setup_caldav_server();
+
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-home-set/>
+  </D:prop>
+</D:propfind>"#;
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/")
+            .header("Depth", "0")
+            .body(Body::from(propfind_body))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("calendar-home-set"),
+            "missing calendar-home-set: {body_str}"
+        );
+        assert!(
+            body_str.contains("/calendars/"),
+            "missing /calendars/ href: {body_str}"
+        );
+    }
 }
 
 #[cfg(all(not(feature = "caldav"), feature = "memfs"))]
