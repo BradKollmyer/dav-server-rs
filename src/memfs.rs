@@ -440,6 +440,7 @@ impl DavFile for MemFsFile {
             }
             file.data[self.pos..end].copy_from_slice(&buf);
             self.pos = end;
+            file.mtime = SystemTime::now();
             Ok(())
         }
         .boxed()
@@ -464,6 +465,7 @@ impl DavFile for MemFsFile {
                 buf.advance(len);
                 self.pos += len;
             }
+            file.mtime = SystemTime::now();
             Ok(())
         }
         .boxed()
@@ -702,5 +704,43 @@ mod tests {
         let meta = DavFileSystem::metadata(&*fs, &path("/file")).await.unwrap();
         assert!(!meta.is_dir());
         assert_eq!(meta.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn write_without_truncate_updates_mtime() {
+        let fs = MemFs::new();
+        create_file(&fs, "/file", b"hello").await;
+        let p = path("/file");
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        DavFileSystem::set_modified(&*fs, &p, old).await.unwrap();
+
+        let before = DavFileSystem::metadata(&*fs, &p).await.unwrap();
+        let before_mtime = before.modified().unwrap();
+        let before_etag = before.etag();
+        assert_eq!(before_mtime, old);
+
+        let mut oo = OpenOptions::write();
+        oo.truncate = false;
+        let mut f = DavFileSystem::open(&*fs, &p, oo).await.unwrap();
+        f.write_bytes(Bytes::from_static(b"world")).await.unwrap();
+        drop(f);
+
+        let after = DavFileSystem::metadata(&*fs, &p).await.unwrap();
+        assert_ne!(after.modified().unwrap(), before_mtime);
+        assert_ne!(after.etag(), before_etag);
+        assert_eq!(after.len(), 5);
+
+        DavFileSystem::set_modified(&*fs, &p, old).await.unwrap();
+        let mut oo = OpenOptions::write();
+        oo.truncate = false;
+        let mut f = DavFileSystem::open(&*fs, &p, oo).await.unwrap();
+        f.write_buf(Box::new(Bytes::from_static(b"abcde")))
+            .await
+            .unwrap();
+        drop(f);
+
+        let after_buf = DavFileSystem::metadata(&*fs, &p).await.unwrap();
+        assert_ne!(after_buf.modified().unwrap(), old);
+        assert_ne!(after_buf.etag(), before_etag);
     }
 }

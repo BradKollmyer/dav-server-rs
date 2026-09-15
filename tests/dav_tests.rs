@@ -2470,4 +2470,62 @@ mod memfs_path_tests {
         assert_eq!(file_get.status(), StatusCode::OK);
         assert_eq!(resp_to_string(file_get).await, "hello");
     }
+
+    #[tokio::test]
+    async fn partial_put_updates_etag() {
+        let server = setup();
+
+        let put = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/file")
+                    .header("X-OC-MTime", "1675789581")
+                    .body(Body::from("hello"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(put.status(), StatusCode::CREATED);
+        let etag = put
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let last_mod = put
+            .headers()
+            .get("last-modified")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        assert!(etag.is_some());
+        assert_eq!(last_mod.as_deref(), Some("Tue, 07 Feb 2023 17:06:21 GMT"));
+
+        let patch = server
+            .handle(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/file")
+                    .header("Content-Type", "application/x-sabredav-partialupdate")
+                    .header("X-Update-Range", "bytes=0-4")
+                    .header("Content-Length", "5")
+                    .body(Body::from("world"))
+                    .unwrap(),
+            )
+            .await;
+        assert!(patch.status().is_success(), "PATCH {}", patch.status());
+        let patch_etag = patch
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let patch_mod = patch
+            .headers()
+            .get("last-modified")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        assert_ne!(patch_etag, etag, "etag should change after partial write");
+        assert_ne!(
+            patch_mod, last_mod,
+            "last-modified should change after partial write"
+        );
+    }
 }
