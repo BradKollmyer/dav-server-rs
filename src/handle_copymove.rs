@@ -167,9 +167,14 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         // decode and validate destination.
         let dest = match req.headers().typed_get::<davheaders::Destination>() {
-            Some(dest) => DavPath::from_str_and_prefix(&dest.0, &self.prefix)?,
+            Some(dest) => dest,
             None => return Err(StatusCode::BAD_REQUEST.into()),
         };
+        // RFC 4918 10.3: Destination on another server is 502 Bad Gateway.
+        if !dest.is_same_server(req.uri()) {
+            return Err(StatusCode::BAD_GATEWAY.into());
+        }
+        let dest = DavPath::from_str_and_prefix(&dest.path, &self.prefix)?;
 
         // for MOVE, tread with care- if the path ends in "/" but it actually
         // is a symlink, we want to move the symlink, not what it points to.

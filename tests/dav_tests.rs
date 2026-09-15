@@ -1317,7 +1317,7 @@ mod if_state_token_tests {
             .handle(
                 Request::builder()
                     .method("COPY")
-                    .uri("/src.txt")
+                    .uri("http://example.com/src.txt")
                     .header("Destination", "/dst.txt")
                     .header("If", format!("<http://example.com/dst.txt> ({token})"))
                     .body(Body::empty())
@@ -2849,7 +2849,7 @@ mod get_delete_copymove_tests {
         assert_eq!(
             copy(
                 &server,
-                "/a.txt",
+                "http://example.com/a.txt",
                 "http://example.com/copied.txt",
                 None,
                 None
@@ -2861,6 +2861,33 @@ mod get_delete_copymove_tests {
             resp_to_string(get(&server, "/copied.txt").await).await,
             "alpha"
         );
+        assert_eq!(
+            copy(
+                &server,
+                "http://example.com/a.txt",
+                "http://example.com:80/copied-port.txt",
+                None,
+                None
+            )
+            .await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            resp_to_string(get(&server, "/copied-port.txt").await).await,
+            "alpha"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_destination_other_host_is_bad_gateway() {
+        let server = setup();
+        assert_eq!(put(&server, "/a.txt", "alpha").await, StatusCode::CREATED);
+        assert_eq!(
+            copy(&server, "/a.txt", "http://evil.example/file", None, None).await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(get(&server, "/file").await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp_to_string(get(&server, "/a.txt").await).await, "alpha");
     }
 
     #[tokio::test]

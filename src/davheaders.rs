@@ -308,7 +308,52 @@ impl Header for Timeout {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Destination(pub String);
+pub struct Destination {
+    pub path: String,
+    abs_url: Option<Url>,
+}
+
+impl Destination {
+    /// RFC 4918 10.3: absolute-path is local; absolute URLs must match the request server.
+    pub(crate) fn is_same_server(&self, request: &http::Uri) -> bool {
+        match self.abs_url {
+            None => true,
+            Some(ref url) => url_is_same_server(request, url),
+        }
+    }
+}
+
+/// True if `url` names a resource on the same server as `request`.
+/// Host comparison is case-insensitive; default ports 80/443 match an omitted port.
+/// If the request URI has no host, an absolute `url` with a host is off-server.
+pub(crate) fn url_is_same_server(request: &http::Uri, url: &Url) -> bool {
+    match (request.host(), url.host_str()) {
+        (Some(a), Some(b)) if a.eq_ignore_ascii_case(b) => {}
+        (None, None) => {}
+        _ => return false,
+    }
+
+    if let Some(req_scheme) = request.scheme_str()
+        && !req_scheme.eq_ignore_ascii_case(url.scheme())
+    {
+        return false;
+    }
+
+    let req_port = effective_port(request.scheme_str(), request.port_u16());
+    let url_port = effective_port(Some(url.scheme()), url.port());
+    match (req_port, url_port) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
+
+fn effective_port(scheme: Option<&str>, port: Option<u16>) -> Option<u16> {
+    port.or_else(|| match scheme {
+        Some(s) if s.eq_ignore_ascii_case("http") => Some(80),
+        Some(s) if s.eq_ignore_ascii_case("https") => Some(443),
+        _ => None,
+    })
+}
 
 impl Header for Destination {
     fn name() -> &'static HeaderName {
@@ -321,10 +366,16 @@ impl Header for Destination {
     {
         let s = one(values)?.to_str().map_err(map_invalid)?;
         if s.starts_with('/') {
-            return Ok(Destination(s.to_string()));
+            return Ok(Destination {
+                path: s.to_string(),
+                abs_url: None,
+            });
         }
         if let Ok(url) = s.parse::<Url>() {
-            return Ok(Destination(url.path().to_string()));
+            return Ok(Destination {
+                path: url.path().to_string(),
+                abs_url: Some(url),
+            });
         }
         Err(invalid())
     }
@@ -333,7 +384,7 @@ impl Header for Destination {
     where
         E: Extend<HeaderValue>,
     {
-        values.extend(std::iter::once(HeaderValue::from_str(&self.0).unwrap()));
+        values.extend(std::iter::once(HeaderValue::from_str(&self.path).unwrap()));
     }
 }
 
@@ -964,5 +1015,55 @@ mod tests {
                 "expected {invalid_val:?} to be rejected"
             );
         }
+    }
+
+    fn uri(s: &str) -> http::Uri {
+        s.parse().unwrap()
+    }
+    fn url(s: &str) -> Url {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn destination_absolute_path_is_local() {
+        let hdrval = HeaderValue::from_static("/copied.txt");
+        let mut iter = std::iter::once(&hdrval);
+        let dest = Destination::decode(&mut iter).unwrap();
+        assert_eq!(dest.path, "/copied.txt");
+        assert!(dest.is_same_server(&uri("/a.txt")));
+        assert!(dest.is_same_server(&uri("http://example.com/a.txt")));
+    }
+
+    #[test]
+    fn url_is_same_server_matches_host_and_default_port() {
+        let dest = url("http://example.com/copied.txt");
+        assert!(url_is_same_server(&uri("http://example.com/a.txt"), &dest));
+        assert!(url_is_same_server(
+            &uri("http://example.com:80/a.txt"),
+            &dest
+        ));
+        assert!(url_is_same_server(
+            &uri("http://EXAMPLE.COM/a.txt"),
+            &url("http://example.com:80/copied.txt")
+        ));
+        assert!(url_is_same_server(
+            &uri("https://example.com/a.txt"),
+            &url("https://example.com:443/copied.txt")
+        ));
+    }
+
+    #[test]
+    fn url_is_same_server_rejects_other_host_scheme_port() {
+        let dest = url("http://evil.example/file");
+        assert!(!url_is_same_server(&uri("http://example.com/a.txt"), &dest));
+        assert!(!url_is_same_server(&uri("/a.txt"), &dest));
+        assert!(!url_is_same_server(
+            &uri("http://example.com/a.txt"),
+            &url("https://example.com/file")
+        ));
+        assert!(!url_is_same_server(
+            &uri("http://example.com:8080/a.txt"),
+            &url("http://example.com/file")
+        ));
     }
 }

@@ -165,13 +165,14 @@ where
         let mut pa: Option<DavPath> = None;
         let (p, valid) = match iflist.resource_tag {
             Some(ref url) => {
+                // Host mismatch is an invalid location (condition false), not 502.
                 match DavPath::from_str_and_prefix(url.path(), path.prefix()) {
-                    Ok(p) => {
+                    Ok(p) if davheaders::url_is_same_server(req.uri(), url) => {
                         // anchor davpath in pa.
                         let p: &DavPath = pa.get_or_insert(p);
                         (p, true)
                     }
-                    Err(_) => (path, false),
+                    _ => (path, false),
                 }
             }
             None => (path, true),
@@ -371,5 +372,31 @@ mod tests {
         let (ok, tokens) = dav_if_match(&req, fs.as_ref(), &ls, &path, &()).await;
         assert!(!ok);
         assert_eq!(tokens, vec!["DAV:no-lock".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn tagged_if_other_host_is_false() {
+        let fs = VoidFs::<()>::new();
+        let ls: Option<Box<dyn DavLockSystem>> = Some(MemLs::new());
+        let path = DavPath::new("/file").unwrap();
+        let req = req_if(
+            "http://example.com/file",
+            "<http://evil.example/file> (<opaquelocktoken:garbage>)",
+        );
+        let (ok, _) = dav_if_match(&req, fs.as_ref(), &ls, &path, &()).await;
+        assert!(!ok);
+    }
+
+    #[tokio::test]
+    async fn tagged_if_same_host_default_port_is_valid_location() {
+        let fs = VoidFs::<()>::new();
+        let ls: Option<Box<dyn DavLockSystem>> = Some(MemLs::new());
+        let path = DavPath::new("/file").unwrap();
+        let req = req_if(
+            "http://example.com/file",
+            "<http://example.com:80/file> (Not <DAV:no-lock>)",
+        );
+        let (ok, _) = dav_if_match(&req, fs.as_ref(), &ls, &path, &()).await;
+        assert!(ok);
     }
 }
