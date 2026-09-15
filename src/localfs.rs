@@ -402,6 +402,7 @@ impl LocalFs {
                 std::fs::OpenOptions::new()
                     .write(true)
                     .create(true)
+                    .truncate(true)
                     .open(&sidecar)
                     .map(|_| ())
                     .map_err(FsError::from)

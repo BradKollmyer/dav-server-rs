@@ -1605,7 +1605,7 @@ mod quota_bytes_tests {
         assert_eq!(file_avail, Some(900));
         assert_eq!(dir_used, file_used);
         assert_eq!(file_used, q_used);
-        assert_ne!(file_avail, Some(q_total.unwrap() - file_len));
+        assert_ne!(file_avail, Some(1000 - file_len));
     }
 
     #[test]

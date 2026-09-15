@@ -1110,10 +1110,12 @@ mod default_mark_collection_props {
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
 
+    type DeadProps = HashMap<Vec<u8>, HashMap<String, DavProp>>;
+
     #[derive(Clone, Default)]
     struct HashMapPropFs {
         have_props: bool,
-        props: Arc<Mutex<HashMap<Vec<u8>, HashMap<String, DavProp>>>>,
+        props: Arc<Mutex<DeadProps>>,
     }
 
     #[derive(Debug, Clone)]

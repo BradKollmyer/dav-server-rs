@@ -603,6 +603,7 @@ mod localfs_umask_tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // umask is process-global; lock must cover the awaits
     async fn put_and_mkcol_honor_umask() {
         let _lock = UMASK_LOCK.lock().unwrap();
         let _umask = UmaskGuard::set(0o002);

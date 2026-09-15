@@ -111,7 +111,7 @@ impl DavLockSystem for FakeLs {
             shared,
             deep,
         };
-        debug!("lock {} created", &lock.token);
+        debug!("lock {} created", lock.token);
         self.0
             .lock()
             .unwrap()
