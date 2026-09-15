@@ -765,6 +765,25 @@ END:VCALENDAR"#;
     }
 
     #[tokio::test]
+    async fn test_freebusy_query_not_implemented() {
+        let server = setup_caldav_server2().await;
+
+        let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:free-busy-query xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <C:time-range start="20240101T000000Z" end="20240201T000000Z"/>
+</C:free-busy-query>"#;
+
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/calendars/my-calendar")
+            .body(Body::from(report_body.to_string()))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
     async fn test_calendar_put_match_header() {
         let server = setup_caldav_server2().await;
         let ics_data = create_ics_data("test-event-1", "Test Event");

@@ -1,4 +1,3 @@
-use chrono::Utc;
 use futures_util::StreamExt;
 use headers::HeaderMapExt;
 use http::{Request, Response, StatusCode};
@@ -493,32 +492,8 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             .await
     }
 
-    async fn handle_freebusy_query(
-        &self,
-        _: &DavPath,
-        time_range: TimeRange,
-    ) -> DavResult<Response<Body>> {
-        //TODO: freebusy implementation
-        // For now, return an empty freebusy response
-        // A full implementation would analyze calendar events and generate freebusy information
-
-        let freebusy_data = format!(
-            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//DAV-SERVER//CalDAV//EN\r\n\
-             BEGIN:VFREEBUSY\r\nUID:{}\r\nDTSTAMP:{}Z\r\n\
-             DTSTART:{}\r\nDTEND:{}\r\n\
-             END:VFREEBUSY\r\nEND:VCALENDAR\r\n",
-            uuid::Uuid::new_v4(),
-            Utc::now().format("%Y%m%dT%H%M%S"),
-            time_range.start.as_deref().unwrap_or("20000101T000000Z"),
-            time_range.end.as_deref().unwrap_or("20991231T235959Z")
-        );
-
-        let mut resp = Response::new(Body::from(freebusy_data));
-        resp.headers_mut().insert(
-            "content-type",
-            "text/calendar; charset=utf-8".parse().unwrap(),
-        );
-        Ok(resp)
+    async fn handle_freebusy_query(&self, _: &DavPath, _: TimeRange) -> DavResult<Response<Body>> {
+        Err(DavError::StatusClose(StatusCode::NOT_IMPLEMENTED))
     }
 
     fn matches_query(&self, content: &str, query: &CalendarQuery) -> bool {
