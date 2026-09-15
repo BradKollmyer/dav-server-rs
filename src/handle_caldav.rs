@@ -352,6 +352,41 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     "text-match" => {
                         filter.text_match = Some(self.parse_text_match(child_elem)?);
                     }
+                    "param-filter" => {
+                        filter
+                            .param_filters
+                            .push(self.parse_param_filter(child_elem)?);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(filter)
+    }
+
+    fn parse_param_filter(&self, elem: &Element) -> DavResult<ParameterFilter> {
+        let name = elem
+            .attributes
+            .get("name")
+            .ok_or(DavError::StatusClose(StatusCode::BAD_REQUEST))?
+            .clone();
+
+        let mut filter = ParameterFilter {
+            name,
+            is_not_defined: false,
+            text_match: None,
+        };
+
+        for child in &elem.children {
+            if let XMLNode::Element(child_elem) = child {
+                match child_elem.name.as_str() {
+                    "is-not-defined" => {
+                        filter.is_not_defined = true;
+                    }
+                    "text-match" => {
+                        filter.text_match = Some(self.parse_text_match(child_elem)?);
+                    }
                     _ => {}
                 }
             }

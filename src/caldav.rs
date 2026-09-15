@@ -7,7 +7,9 @@
 #[cfg(feature = "caldav")]
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Utc};
 #[cfg(feature = "caldav")]
-use icalendar::{Calendar, CalendarComponent, CalendarDateTime, Component, DatePerhapsTime};
+use icalendar::{
+    Calendar, CalendarComponent, CalendarDateTime, Component, DatePerhapsTime, Property,
+};
 use xmltree::Element;
 
 use crate::davpath::DavPath;
@@ -126,10 +128,9 @@ pub struct ComponentFilter {
 
 /// CalDAV property filter.
 ///
-/// Matching uses `name`, `is_not_defined`, and optional `text-match`.
-/// `time_range` and `param_filters` are parsed from REPORT XML but are not
-/// applied when evaluating a query. CardDAV has a similar struct without
-/// `time_range`.
+/// Matching uses `name`, `is_not_defined`, optional `text-match`,
+/// `time_range` on DATE/DATE-TIME values, and `param_filters`.
+/// CardDAV has a similar struct without `time_range`.
 #[derive(Debug, Clone)]
 pub struct PropertyFilter {
     pub name: String,
@@ -512,43 +513,92 @@ fn time_spans_overlap(
 
 #[cfg(feature = "caldav")]
 fn calendar_matches_prop_filter(calendar: &Calendar, pf: &PropertyFilter) -> bool {
-    let values: Vec<&str> = calendar
+    let props: Vec<&Property> = calendar
         .properties
         .iter()
         .filter(|p| p.key().eq_ignore_ascii_case(&pf.name))
-        .map(|p| p.value())
         .collect();
-    matches_prop_values(&values, pf)
+    matches_prop_values(&props, pf)
 }
 
 #[cfg(feature = "caldav")]
 fn component_matches_prop_filter<C: Component>(comp: &C, pf: &PropertyFilter) -> bool {
-    let mut values: Vec<&str> = Vec::new();
+    let mut props: Vec<&Property> = Vec::new();
     for (key, prop) in comp.properties() {
         if key.eq_ignore_ascii_case(&pf.name) {
-            values.push(prop.value());
+            props.push(prop);
         }
     }
-    for (key, props) in comp.multi_properties() {
+    for (key, multi) in comp.multi_properties() {
         if key.eq_ignore_ascii_case(&pf.name) {
-            values.extend(props.iter().map(|p| p.value()));
+            props.extend(multi.iter());
         }
     }
-    matches_prop_values(&values, pf)
+    matches_prop_values(&props, pf)
 }
 
-/// Property exists (or is-not-defined), plus optional substring text-match on
-/// the property value. param-filter and prop-filter time-range are ignored.
+/// Property exists (or is-not-defined). Any instance that satisfies optional
+/// text-match, time-range, and all param-filters is enough.
 #[cfg(feature = "caldav")]
-fn matches_prop_values(values: &[&str], pf: &PropertyFilter) -> bool {
+fn matches_prop_values(props: &[&Property], pf: &PropertyFilter) -> bool {
     if pf.is_not_defined {
-        return values.is_empty();
+        return props.is_empty();
     }
-    if values.is_empty() {
+    if props.is_empty() {
         return false;
     }
+    props.iter().any(|prop| property_instance_matches(prop, pf))
+}
+
+#[cfg(feature = "caldav")]
+fn property_instance_matches(prop: &Property, pf: &PropertyFilter) -> bool {
+    if let Some(tm) = &pf.text_match
+        && !text_matches_value(prop.value(), tm)
+    {
+        return false;
+    }
+    if let Some(tr) = &pf.time_range
+        && !property_overlaps_time_range(prop, tr)
+    {
+        return false;
+    }
+    pf.param_filters
+        .iter()
+        .all(|param_f| param_filter_matches(prop, param_f))
+}
+
+/// DATE-TIME is a point; DATE is a one-day interval. Non-date values do not match.
+#[cfg(feature = "caldav")]
+fn property_overlaps_time_range(prop: &Property, tr: &TimeRange) -> bool {
+    let Some(range) = parse_time_range_bounds(tr) else {
+        return false;
+    };
+    let Some(dpt) = DatePerhapsTime::from_property(prop) else {
+        return false;
+    };
+    let start = to_utc(&dpt);
+    let end = match &dpt {
+        DatePerhapsTime::Date(_) => start + TimeDelta::days(1),
+        DatePerhapsTime::DateTime(_) => start,
+    };
+    time_spans_overlap(start, end, range.start, range.end)
+}
+
+#[cfg(feature = "caldav")]
+fn param_filter_matches(prop: &Property, pf: &ParameterFilter) -> bool {
+    let value = prop
+        .params()
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(&pf.name))
+        .map(|(_, p)| p.value());
+    if pf.is_not_defined {
+        return value.is_none();
+    }
+    let Some(value) = value else {
+        return false;
+    };
     match &pf.text_match {
-        Some(tm) => values.iter().any(|v| text_matches_value(v, tm)),
+        Some(tm) => text_matches_value(value, tm),
         None => true,
     }
 }
@@ -611,6 +661,107 @@ mod tests {
             "BEGIN:VCALENDAR\nNOT VALID\nEND:VCALENDAR",
             &query
         ));
+    }
+
+    fn vevent_ics(summary: &str, dtstart: &str, dtend: &str) -> String {
+        format!(
+            "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:1\nDTSTART:{dtstart}\nDTEND:{dtend}\nSUMMARY:{summary}\nEND:VEVENT\nEND:VCALENDAR"
+        )
+    }
+
+    #[test]
+    fn prop_filter_time_range_on_dtstart() {
+        let mut filter = vevent_filter();
+        filter.prop_filters.push(PropertyFilter {
+            name: "DTSTART".into(),
+            is_not_defined: false,
+            text_match: None,
+            time_range: Some(TimeRange {
+                start: Some("20240601T000000Z".into()),
+                end: Some("20240701T000000Z".into()),
+            }),
+            param_filters: Vec::new(),
+        });
+        let query = vcalendar_with(filter);
+
+        assert!(calendar_matches_query(
+            &vevent_ics("Inside", "20240615T120000Z", "20240615T130000Z"),
+            &query
+        ));
+        assert!(!calendar_matches_query(
+            &vevent_ics("Outside", "20240101T120000Z", "20240101T130000Z"),
+            &query
+        ));
+    }
+
+    #[test]
+    fn prop_filter_time_range_rejects_non_date_property() {
+        let mut filter = vevent_filter();
+        filter.prop_filters.push(PropertyFilter {
+            name: "SUMMARY".into(),
+            is_not_defined: false,
+            text_match: None,
+            time_range: Some(TimeRange {
+                start: Some("20240601T000000Z".into()),
+                end: Some("20240701T000000Z".into()),
+            }),
+            param_filters: Vec::new(),
+        });
+        let query = vcalendar_with(filter);
+        assert!(!calendar_matches_query(
+            &vevent_ics("June Event", "20240615T120000Z", "20240615T130000Z"),
+            &query
+        ));
+    }
+
+    #[test]
+    fn prop_filter_param_filter_on_attendee_partstat() {
+        let mut filter = vevent_filter();
+        filter.prop_filters.push(PropertyFilter {
+            name: "ATTENDEE".into(),
+            is_not_defined: false,
+            text_match: None,
+            time_range: None,
+            param_filters: vec![ParameterFilter {
+                name: "PARTSTAT".into(),
+                is_not_defined: false,
+                text_match: Some(TextMatch {
+                    text: "NEEDS-ACTION".into(),
+                    ..Default::default()
+                }),
+            }],
+        });
+        let query = vcalendar_with(filter);
+
+        let needs = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:1\nDTSTART:20240615T120000Z\nDTEND:20240615T130000Z\nSUMMARY:Needs\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:a@example.com\nEND:VEVENT\nEND:VCALENDAR";
+        let accepted = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:2\nDTSTART:20240615T120000Z\nDTEND:20240615T130000Z\nSUMMARY:Accepted\nATTENDEE;PARTSTAT=ACCEPTED:mailto:b@example.com\nEND:VEVENT\nEND:VCALENDAR";
+        assert!(calendar_matches_query(needs, &query));
+        assert!(!calendar_matches_query(accepted, &query));
+    }
+
+    #[test]
+    fn prop_filter_param_filter_on_dtstart_tzid() {
+        let mut filter = vevent_filter();
+        filter.prop_filters.push(PropertyFilter {
+            name: "DTSTART".into(),
+            is_not_defined: false,
+            text_match: None,
+            time_range: None,
+            param_filters: vec![ParameterFilter {
+                name: "TZID".into(),
+                is_not_defined: false,
+                text_match: Some(TextMatch {
+                    text: "America/New_York".into(),
+                    ..Default::default()
+                }),
+            }],
+        });
+        let query = vcalendar_with(filter);
+
+        let with_tz = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:1\nDTSTART;TZID=America/New_York:20240615T120000\nDTEND;TZID=America/New_York:20240615T130000\nSUMMARY:NY\nEND:VEVENT\nEND:VCALENDAR";
+        let utc = vevent_ics("UTC", "20240615T120000Z", "20240615T130000Z");
+        assert!(calendar_matches_query(with_tz, &query));
+        assert!(!calendar_matches_query(&utc, &query));
     }
 
     fn dav_path(p: &str) -> DavPath {

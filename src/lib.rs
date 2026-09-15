@@ -52,7 +52,7 @@
 //! CalDAV support is a partial [RFC4791] implementation, not full coverage:
 //! - Calendar collections (MKCALENDAR) at `/calendars/<name>` (immediate children only)
 //! - Calendar queries (REPORT `calendar-query`; `CALDAV:filter` is required)
-//! - Nested `comp-filter` evaluation, plus `prop-filter`/`text-match` on property values
+//! - Nested `comp-filter` evaluation, plus `prop-filter` (`text-match`, `time-range`, `param-filter`)
 //! - Calendar multiget (REPORT `calendar-multiget`; hrefs must be in the collection)
 //! - CalDAV properties (`supported-calendar-component-set`, `max-resource-size` 1MB, etc.)
 //! - `free-busy-query` returns `501 Not Implemented`
@@ -124,7 +124,7 @@
 //! This adds a partial CalDAV implementation:
 //! - `MKCALENDAR` for calendar collections at `/calendars/<name>` (immediate children only)
 //! - `REPORT` subset: `calendar-query` (required `CALDAV:filter`, nested `comp-filter`,
-//!   `prop-filter`/`text-match`) and `calendar-multiget` (hrefs confined to the collection)
+//!   `prop-filter` with `text-match`/`time-range`/`param-filter`) and `calendar-multiget` (hrefs confined to the collection)
 //! - CalDAV-specific properties (`max-resource-size` 1MB) and resource types
 //!
 //! `free-busy-query` returns `501 Not Implemented`. PUT does not run

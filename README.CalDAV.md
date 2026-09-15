@@ -21,7 +21,7 @@ The CalDAV implementation in dav-server includes:
 - **CalDAV Properties**: Calendar-specific WebDAV properties (`max-resource-size` is 1MB)
 - **Time Range Queries**: Filter events by date/time ranges
 - **Component Filtering**: Nested `comp-filter` by calendar component types (VEVENT, VTODO, etc.)
-- **Property Filtering**: `prop-filter` with optional `text-match` on property values
+- **Property Filtering**: `prop-filter` with optional `text-match`, `time-range`, and `param-filter`
 - **Unreadable members**: Unreadable or unparseable collection members are skipped, not failed
 
 ## Enabling CalDAV
@@ -84,8 +84,8 @@ Query calendar data. Response `href` values include the handler `strip_prefix`
 `calendar-query` requires a `CALDAV:filter` with a nested `comp-filter`
 (RFC 4791 7.8.1). A REPORT without that filter is `400 Bad Request`. Nested
 `comp-filter` elements are evaluated; `prop-filter` matches the named iCalendar
-property, with optional `text-match`. `param-filter` and `prop-filter`
-`time-range` are parsed but not applied.
+property, with optional `text-match`, `time-range` on DATE/DATE-TIME values,
+and `param-filter` on property parameters.
 
 #### Calendar Query
 
@@ -189,7 +189,7 @@ The CalDAV implementation has been tested with:
 
 Current limitations include:
 
-- Partial RFC 4791 coverage: `calendar-query` / `calendar-multiget` are an implemented subset (nested `comp-filter`, `text-match`, required filter, href confinement)
+- Partial RFC 4791 coverage: `calendar-query` / `calendar-multiget` are an implemented subset (nested `comp-filter`, `prop-filter` `text-match`/`time-range`/`param-filter`, required filter, href confinement)
 - `free-busy-query` returns `501 Not Implemented`
 - Calendar identity is `/calendars/<name>` (immediate children of `/calendars` only)
 - `max-resource-size` is 1MB
@@ -199,7 +199,6 @@ Current limitations include:
 - No calendar sharing or ACL support
 - Basic time zone handling
 - No recurring event expansion in queries
-- `prop-filter` `time-range` and `param-filter` are not applied
 - `calendar-multiget` hrefs outside the collection are treated as missing
 
 ## Example Applications

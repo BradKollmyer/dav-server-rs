@@ -754,6 +754,128 @@ END:VCALENDAR"
     }
 
     #[tokio::test]
+    async fn test_calendar_query_prop_filter_time_range_on_dtstart() {
+        let server = setup_caldav_server2().await;
+        put_ics_data(
+            &server,
+            create_vevent_ics(
+                "jan-event",
+                "January Event",
+                "20240101T120000Z",
+                "20240101T130000Z",
+            ),
+            "/calendars/my-calendar/jan.ics",
+        )
+        .await;
+        put_ics_data(
+            &server,
+            create_vevent_ics(
+                "jun-event",
+                "June Event",
+                "20240615T120000Z",
+                "20240615T130000Z",
+            ),
+            "/calendars/my-calendar/jun.ics",
+        )
+        .await;
+
+        let june_query = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT">
+        <C:prop-filter name="DTSTART">
+          <C:time-range start="20240601T000000Z" end="20240701T000000Z"/>
+        </C:prop-filter>
+      </C:comp-filter>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>"#;
+
+        let (status, body) = report_calendar_query(&server, june_query).await;
+        assert_eq!(status, StatusCode::MULTI_STATUS);
+        assert!(
+            body.contains("June Event"),
+            "DTSTART in-range event missing: {body}"
+        );
+        assert!(
+            !body.contains("January Event"),
+            "DTSTART out-of-range event must be excluded: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_calendar_query_param_filter_on_attendee_partstat() {
+        let server = setup_caldav_server2().await;
+        put_ics_data(
+            &server,
+            "BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//Test//EN
+BEGIN:VEVENT
+UID:needs-1
+DTSTART:20240615T120000Z
+DTEND:20240615T130000Z
+SUMMARY:Needs Action
+ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:a@example.com
+END:VEVENT
+END:VCALENDAR"
+                .to_string(),
+            "/calendars/my-calendar/needs.ics",
+        )
+        .await;
+        put_ics_data(
+            &server,
+            "BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//Test//EN
+BEGIN:VEVENT
+UID:accepted-1
+DTSTART:20240615T120000Z
+DTEND:20240615T130000Z
+SUMMARY:Accepted
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:b@example.com
+END:VEVENT
+END:VCALENDAR"
+                .to_string(),
+            "/calendars/my-calendar/accepted.ics",
+        )
+        .await;
+
+        let partstat_query = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT">
+        <C:prop-filter name="ATTENDEE">
+          <C:param-filter name="PARTSTAT">
+            <C:text-match collation="i;unicode-casemap">NEEDS-ACTION</C:text-match>
+          </C:param-filter>
+        </C:prop-filter>
+      </C:comp-filter>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>"#;
+
+        let (status, body) = report_calendar_query(&server, partstat_query).await;
+        assert_eq!(status, StatusCode::MULTI_STATUS);
+        assert!(
+            body.contains("Needs Action"),
+            "PARTSTAT NEEDS-ACTION event missing: {body}"
+        );
+        assert!(
+            !body.contains("Accepted"),
+            "PARTSTAT ACCEPTED event must be excluded: {body}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_calendar_multiget_report() {
         let server = setup_caldav_server2().await;
         let ics_data = create_ics_data("test-event-1", "Test Event0001");
