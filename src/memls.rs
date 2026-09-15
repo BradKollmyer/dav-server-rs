@@ -46,6 +46,10 @@ impl MemLs {
         };
         Box::new(MemLs(Arc::new(Mutex::new(inner))))
     }
+
+    fn inner(&self) -> std::sync::MutexGuard<'_, MemLsInner> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 impl DavLockSystem for MemLs {
@@ -58,7 +62,7 @@ impl DavLockSystem for MemLs {
         shared: bool,
         deep: bool,
     ) -> LsFuture<'_, Result<DavLock, DavLock>> {
-        let inner = &mut *self.0.lock().unwrap();
+        let inner = &mut *self.inner();
         prune_expired_locks(&mut inner.tree);
 
         // any locks in the path?
@@ -97,7 +101,7 @@ impl DavLockSystem for MemLs {
     }
 
     fn unlock(&'_ self, path: &DavPath, token: &str) -> LsFuture<'_, Result<(), ()>> {
-        let inner = &mut *self.0.lock().unwrap();
+        let inner = &mut *self.inner();
         prune_expired_locks(&mut inner.tree);
         let node_id = match lookup_lock(&inner.tree, path, token) {
             None => {
@@ -125,7 +129,7 @@ impl DavLockSystem for MemLs {
         timeout: Option<Duration>,
     ) -> LsFuture<'_, Result<DavLock, ()>> {
         trace!("refresh lock {token}");
-        let inner = &mut *self.0.lock().unwrap();
+        let inner = &mut *self.inner();
         prune_expired_locks(&mut inner.tree);
         let node_id = match lookup_lock(&inner.tree, path, token) {
             None => {
@@ -151,7 +155,7 @@ impl DavLockSystem for MemLs {
         deep: bool,
         submitted_tokens: &[String],
     ) -> LsFuture<'_, Result<(), DavLock>> {
-        let inner = &mut *self.0.lock().unwrap();
+        let inner = &mut *self.inner();
         prune_expired_locks(&mut inner.tree);
         let _st = submitted_tokens;
         let rc = check_locks_to_path(
@@ -186,13 +190,13 @@ impl DavLockSystem for MemLs {
     }
 
     fn discover(&'_ self, path: &DavPath) -> LsFuture<'_, Vec<DavLock>> {
-        let inner = &mut *self.0.lock().unwrap();
+        let inner = &mut *self.inner();
         prune_expired_locks(&mut inner.tree);
         future::ready(list_locks(&inner.tree, path)).boxed()
     }
 
     fn delete(&'_ self, path: &DavPath) -> LsFuture<'_, Result<(), ()>> {
-        let inner = &mut *self.0.lock().unwrap();
+        let inner = &mut *self.inner();
         if let Some(node_id) = lookup_node(&inner.tree, path) {
             inner.tree.delete_subtree(node_id).ok();
         }
@@ -540,5 +544,17 @@ mod tests {
         let found = ready(ls.discover(&child));
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].token, lock.token);
+    }
+
+    #[test]
+    fn recovers_from_poisoned_mutex() {
+        let ls = MemLs::new();
+        let inner = ls.0.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = inner.lock().unwrap();
+            panic!("poison");
+        }));
+        let p = path();
+        assert!(ready(ls.discover(&p)).is_empty());
     }
 }

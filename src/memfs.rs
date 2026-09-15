@@ -28,6 +28,10 @@ use crate::tree;
 
 type Tree = tree::Tree<Vec<u8>, MemFsNode>;
 
+fn lock_tree(tree: &Mutex<Tree>) -> std::sync::MutexGuard<'_, Tree> {
+    tree.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Ephemeral in-memory filesystem.
 #[derive(Debug)]
 pub struct MemFs {
@@ -155,7 +159,7 @@ impl Clone for MemFs {
 impl DavFileSystem for MemFs {
     fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
         async move {
-            let tree = &*self.tree.lock().unwrap();
+            let tree = &*lock_tree(&self.tree);
             let node_id = tree.lookup(path.as_bytes())?;
             let meta = tree.get_node(node_id)?.as_dirent(path.as_bytes());
             Ok(Box::new(meta) as Box<dyn DavMetaData>)
@@ -173,7 +177,7 @@ impl DavFileSystem for MemFs {
         _meta: ReadDirMeta,
     ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
         async move {
-            let tree = &*self.tree.lock().unwrap();
+            let tree = &*lock_tree(&self.tree);
             let node_id = tree.lookup(path.as_bytes())?;
             if !tree.get_node(node_id)?.is_dir() {
                 return Err(FsError::Forbidden);
@@ -196,7 +200,7 @@ impl DavFileSystem for MemFs {
         options: OpenOptions,
     ) -> FsFuture<'a, Box<dyn DavFile>> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *lock_tree(&self.tree);
             self.do_open(tree, path.as_bytes(), options)
         }
         .boxed()
@@ -205,7 +209,7 @@ impl DavFileSystem for MemFs {
     fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
             trace!("FS: create_dir {path:?}");
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *lock_tree(&self.tree);
             let path = path.as_bytes();
             let parent_id = tree.lookup_parent(path)?;
             tree.add_child(parent_id, file_name(path), MemFsNode::new_dir(), false)?;
@@ -218,7 +222,7 @@ impl DavFileSystem for MemFs {
 
     fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *lock_tree(&self.tree);
             let parent_id = tree.lookup_parent(path.as_bytes())?;
             let node_id = tree.lookup(path.as_bytes())?;
             tree.delete_node(node_id)?;
@@ -231,7 +235,7 @@ impl DavFileSystem for MemFs {
 
     fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *lock_tree(&self.tree);
             let parent_id = tree.lookup_parent(path.as_bytes())?;
             let node_id = tree.lookup(path.as_bytes())?;
             tree.delete_node(node_id)?;
@@ -244,7 +248,7 @@ impl DavFileSystem for MemFs {
 
     fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *lock_tree(&self.tree);
             let node_id = tree.lookup(from.as_bytes())?;
             let parent_id = tree.lookup_parent(from.as_bytes())?;
             let dst_id = tree.lookup_parent(to.as_bytes())?;
@@ -264,7 +268,7 @@ impl DavFileSystem for MemFs {
 
     fn copy<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *lock_tree(&self.tree);
 
             // source must exist and be a file; collections are copied by the handler.
             let snode_id = tree.lookup(from.as_bytes())?;
@@ -293,7 +297,7 @@ impl DavFileSystem for MemFs {
 
     fn set_modified<'a>(&'a self, path: &'a DavPath, tm: SystemTime) -> FsFuture<'a, ()> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *lock_tree(&self.tree);
             let node_id = tree.lookup(path.as_bytes())?;
             tree.get_node_mut(node_id)?.update_mtime(tm);
             Ok(())
@@ -303,7 +307,7 @@ impl DavFileSystem for MemFs {
 
     fn set_created<'a>(&'a self, path: &'a DavPath, tm: SystemTime) -> FsFuture<'a, ()> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *lock_tree(&self.tree);
             let node_id = tree.lookup(path.as_bytes())?;
             tree.get_node_mut(node_id)?.update_crtime(tm);
             Ok(())
@@ -322,7 +326,7 @@ impl DavFileSystem for MemFs {
         mut patch: Vec<(bool, DavProp)>,
     ) -> FsFuture<'a, Vec<(StatusCode, DavProp)>> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *lock_tree(&self.tree);
             let node_id = tree.lookup(path.as_bytes())?;
             let node = tree.get_node_mut(node_id)?;
             let props = node.get_props_mut();
@@ -351,7 +355,7 @@ impl DavFileSystem for MemFs {
 
     fn get_props<'a>(&'a self, path: &'a DavPath, do_content: bool) -> FsFuture<'a, Vec<DavProp>> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *lock_tree(&self.tree);
             let node_id = tree.lookup(path.as_bytes())?;
             let node = tree.get_node(node_id)?;
             let mut res = Vec::new();
@@ -365,7 +369,7 @@ impl DavFileSystem for MemFs {
 
     fn get_prop<'a>(&'a self, path: &'a DavPath, prop: DavProp) -> FsFuture<'a, Vec<u8>> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *lock_tree(&self.tree);
             let node_id = tree.lookup(path.as_bytes())?;
             let node = tree.get_node(node_id)?;
             let p = node
@@ -407,7 +411,7 @@ impl DavDirEntry for MemFsDirEntry {
 impl DavFile for MemFsFile {
     fn metadata(&'_ mut self) -> FsFuture<'_, Box<dyn DavMetaData>> {
         async move {
-            let tree = &*self.tree.lock().unwrap();
+            let tree = &*lock_tree(&self.tree);
             let node = tree.get_node(self.node_id)?;
             let meta = node.as_dirent(b"");
             Ok(Box::new(meta) as Box<dyn DavMetaData>)
@@ -417,7 +421,7 @@ impl DavFile for MemFsFile {
 
     fn read_bytes(&'_ mut self, count: usize) -> FsFuture<'_, Bytes> {
         async move {
-            let tree = &*self.tree.lock().unwrap();
+            let tree = &*lock_tree(&self.tree);
             let node = tree.get_node(self.node_id)?;
             let file = node.as_file()?;
             let curlen = file.data.len();
@@ -438,7 +442,7 @@ impl DavFile for MemFsFile {
 
     fn write_bytes(&'_ mut self, buf: Bytes) -> FsFuture<'_, ()> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *lock_tree(&self.tree);
             let node = tree.get_node_mut(self.node_id)?;
             let file = node.as_file_mut()?;
             if self.append {
@@ -458,7 +462,7 @@ impl DavFile for MemFsFile {
 
     fn write_buf(&'_ mut self, mut buf: Box<dyn Buf + Send>) -> FsFuture<'_, ()> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *lock_tree(&self.tree);
             let node = tree.get_node_mut(self.node_id)?;
             let file = node.as_file_mut()?;
             if self.append {
@@ -494,7 +498,7 @@ impl DavFile for MemFsFile {
                 }
                 SeekFrom::Current(npos) => (self.pos as u64, npos),
                 SeekFrom::End(npos) => {
-                    let tree = &*self.tree.lock().unwrap();
+                    let tree = &*lock_tree(&self.tree);
                     let node = tree.get_node(self.node_id)?;
                     let curlen = node.as_file()?.data.len() as u64;
                     (curlen, npos)
@@ -793,5 +797,17 @@ mod tests {
         let src = DavFileSystem::metadata(&*fs, &path("/dir")).await.unwrap();
         assert!(src.is_dir());
         assert!(DavFileSystem::metadata(&*fs, &path("/dest")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn recovers_from_poisoned_mutex() {
+        let fs = MemFs::new();
+        let tree = fs.tree.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = tree.lock().unwrap();
+            panic!("poison");
+        }));
+        let meta = DavFileSystem::metadata(&*fs, &path("/")).await.unwrap();
+        assert!(meta.is_dir());
     }
 }
