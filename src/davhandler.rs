@@ -82,6 +82,8 @@ pub struct DavConfig<C = ()> {
     pub(crate) hide_dot_prefix: Option<DavOptionHide>,
     // Does GET on a directory return indexes.
     pub(crate) autoindex: Option<bool>,
+    // GET `/remote.php/webdav/` returns 200 empty when autoindex is off.
+    pub(crate) remote_php_webdav_probe: Option<bool>,
     // index.html
     pub(crate) indexfile: Option<String>,
     // read buffer size in bytes
@@ -174,6 +176,18 @@ impl<C> DavConfig<C> {
         this
     }
 
+    /// Treat GET `/remote.php/webdav/` as a Nextcloud/GOA connection probe
+    /// (default is false).
+    ///
+    /// When true, autoindex is off, and the request is GET (not HEAD),
+    /// the handler returns 200 with an empty body even if the path does
+    /// not exist. GNOME Online Accounts uses this to test Nextcloud.
+    pub fn remote_php_webdav_probe(self, enable: bool) -> Self {
+        let mut this = self;
+        this.remote_php_webdav_probe = Some(enable);
+        this
+    }
+
     /// Indexfile to show (index.html, usually).
     pub fn indexfile(self, indexfile: impl Into<String>) -> Self {
         let mut this = self;
@@ -205,6 +219,7 @@ impl<C> DavConfig<C> {
             allow_infinity_depth: new.allow_infinity_depth.or(self.allow_infinity_depth),
             hide_dot_prefix: new.hide_dot_prefix.or(self.hide_dot_prefix),
             autoindex: new.autoindex.or(self.autoindex),
+            remote_php_webdav_probe: new.remote_php_webdav_probe.or(self.remote_php_webdav_probe),
             indexfile: new.indexfile.or_else(|| self.indexfile.clone()),
             read_buf_size: new.read_buf_size.or(self.read_buf_size),
             redirect: new.redirect.or(self.redirect),
@@ -226,6 +241,7 @@ pub(crate) struct DavInner<C> {
     pub allow_infinity_depth: bool,
     pub hide_dot_prefix: DavOptionHide,
     pub autoindex: Option<bool>,
+    pub remote_php_webdav_probe: bool,
     pub indexfile: Option<String>,
     pub read_buf_size: Option<usize>,
     pub redirect: Option<bool>,
@@ -358,6 +374,7 @@ where
             allow_infinity_depth,
             hide_dot_prefix,
             autoindex,
+            remote_php_webdav_probe,
             indexfile,
             read_buf_size,
             redirect,
@@ -372,6 +389,7 @@ where
             allow_infinity_depth: allow_infinity_depth.unwrap_or(false),
             hide_dot_prefix: hide_dot_prefix.unwrap_or(DavOptionHide::InAutoIndexListings),
             autoindex,
+            remote_php_webdav_probe: remote_php_webdav_probe.unwrap_or(false),
             indexfile,
             read_buf_size,
             redirect,

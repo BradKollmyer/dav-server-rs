@@ -2624,12 +2624,25 @@ mod get_delete_copymove_tests {
 
     #[tokio::test]
     async fn get_remote_php_webdav_probe() {
-        let server = setup();
+        let server = DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .remote_php_webdav_probe(true)
+            .build_handler();
         let resp = get(&server, "/remote.php/webdav/").await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(header_str(&resp, "content-length").as_deref(), Some("0"));
         assert_eq!(header_str(&resp, "accept-ranges").as_deref(), Some("bytes"));
         assert!(resp_to_bytes(resp).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_remote_php_webdav_probe_default_is_404() {
+        let server = setup();
+        assert_eq!(
+            get(&server, "/remote.php/webdav/").await.status(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]

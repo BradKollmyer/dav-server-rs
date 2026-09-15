@@ -80,7 +80,11 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         let mut path = self.path(req);
 
         // GNOME Online Accounts handler for Nextcloud sends GET /remote.php/webdav/ request only to test its connection and expects 200 OK with empty body
-        if !self.autoindex.unwrap_or(false) && !head && path.as_bytes() == b"/remote.php/webdav/" {
+        if self.remote_php_webdav_probe
+            && !self.autoindex.unwrap_or(false)
+            && !head
+            && path.as_bytes() == b"/remote.php/webdav/"
+        {
             let mut response = Response::new(Body::empty());
             let headers = response.headers_mut();
             headers.insert("Content-Length", "0".parse().unwrap());
