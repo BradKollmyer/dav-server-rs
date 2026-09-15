@@ -189,6 +189,30 @@ impl<K: Eq + Hash + Debug + Clone, D: Debug> Tree<K, D> {
         if id == ROOT_ID {
             return Err(FsError::Forbidden);
         }
+        // RFC 4918 9.9.2: a collection cannot be moved into itself or a descendant.
+        if id == new_parent {
+            return Err(FsError::Forbidden);
+        }
+        {
+            let mut ancestor = new_parent;
+            loop {
+                if ancestor == id {
+                    return Err(FsError::Forbidden);
+                }
+                if ancestor == ROOT_ID {
+                    break;
+                }
+                let parent_id = self
+                    .nodes
+                    .get(&ancestor)
+                    .ok_or(FsError::NotFound)?
+                    .parent_id;
+                if parent_id == NO_PARENT {
+                    break;
+                }
+                ancestor = parent_id;
+            }
+        }
         let dest = {
             let pnode = self.nodes.get(&new_parent).ok_or(FsError::NotFound)?;
             if let Some(cid) = pnode.children.get(&new_name) {
@@ -264,5 +288,21 @@ mod tests {
         );
         assert!(t.get_node(ROOT_ID).is_ok());
         assert!(t.get_node(dest).is_ok());
+    }
+
+    #[cfg(feature = "memfs")]
+    #[test]
+    fn move_into_descendant_is_forbidden() {
+        let mut t = tree();
+        let a = t.add_child(ROOT_ID, "a", 1, false).unwrap();
+        let b = t.add_child(a, "b", 2, false).unwrap();
+        assert_eq!(
+            t.move_node(a, b, "a", false).unwrap_err(),
+            FsError::Forbidden
+        );
+        assert!(t.get_node(a).is_ok());
+        assert!(t.get_node(b).is_ok());
+        assert_eq!(t.get_child(ROOT_ID, &"a").unwrap(), a);
+        assert_eq!(t.get_child(a, &"b").unwrap(), b);
     }
 }
