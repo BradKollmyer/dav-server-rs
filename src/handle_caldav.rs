@@ -39,6 +39,26 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         // Parse the REPORT request body as CalDAV
         let report_type = self.parse_report_request(body)?;
 
+        // RFC 4791 7.8-7.10: these reports are scoped to calendar collections,
+        // and supported-report-set only advertises them there. calendar-query
+        // and calendar-multiget may also be addressed to a calendar object
+        // resource inside a calendar; free-busy-query may not.
+        let meta = self.fs.metadata(&path, &self.credentials).await?;
+        let target_is_calendar = if meta.is_dir() {
+            self.collection_is_calendar(&path, meta.as_ref()).await
+        } else if matches!(report_type, CalDavReportType::FreeBusyQuery { .. }) {
+            false
+        } else {
+            let parent = path.parent();
+            match self.fs.metadata(&parent, &self.credentials).await {
+                Ok(pmeta) => self.collection_is_calendar(&parent, pmeta.as_ref()).await,
+                Err(_) => false,
+            }
+        };
+        if !target_is_calendar {
+            return Err(DavError::Status(StatusCode::FORBIDDEN));
+        }
+
         match report_type {
             CalDavReportType::CalendarQuery(query) => {
                 self.handle_calendar_query(&path, query).await

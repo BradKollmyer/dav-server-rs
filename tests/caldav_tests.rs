@@ -1234,6 +1234,64 @@ END:VCALENDAR"#
     }
 
     #[tokio::test]
+    async fn test_freebusy_query_on_plain_collection_is_forbidden() {
+        let server = setup_caldav_server2().await;
+        mkcol(&server, "/calendars/plain").await;
+
+        let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:free-busy-query xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <C:time-range start="20240101T000000Z" end="20240201T000000Z"/>
+</C:free-busy-query>"#;
+
+        // A plain MKCOL collection is not a calendar: RFC 4791 7.10 forbids the report.
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/calendars/plain")
+            .body(Body::from(report_body.to_string()))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // A missing collection is still a 404.
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/calendars/missing")
+            .body(Body::from(report_body.to_string()))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // calendar-query on a plain collection is rejected the same way.
+        let query_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop><C:calendar-data/></D:prop>
+  <C:filter><C:comp-filter name="VCALENDAR"/></C:filter>
+</C:calendar-query>"#;
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/calendars/plain")
+            .header("Depth", "1")
+            .body(Body::from(query_body.to_string()))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The MKCALENDAR calendar still answers.
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/calendars/my-calendar")
+            .body(Body::from(report_body.to_string()))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("BEGIN:VFREEBUSY"),
+            "expected VFREEBUSY: {body_str}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_calendar_put_match_header() {
         let server = setup_caldav_server2().await;
         let ics_data = create_ics_data("test-event-1", "Test Event");
