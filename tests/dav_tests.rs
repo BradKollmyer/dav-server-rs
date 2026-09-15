@@ -1143,6 +1143,174 @@ mod if_state_token_tests {
             StatusCode::CREATED
         );
     }
+
+    async fn unlock(server: &DavHandler, uri: &str, lock_token: &str) -> StatusCode {
+        server
+            .handle(
+                Request::builder()
+                    .method("UNLOCK")
+                    .uri(uri)
+                    .header("Lock-Token", lock_token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .status()
+    }
+
+    #[tokio::test]
+    async fn unlock_releases_lock_so_put_without_token_succeeds() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/file.txt", "v1", None).await,
+            StatusCode::CREATED
+        );
+        let (status, token) = lock(&server, "/file.txt", "0").await;
+        assert_eq!(status, StatusCode::OK);
+        let token = token.expect("Lock-Token header");
+
+        assert_eq!(
+            put(&server, "/file.txt", "blocked", None).await,
+            StatusCode::LOCKED
+        );
+        assert_eq!(
+            unlock(&server, "/file.txt", &token).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            put(&server, "/file.txt", "v2", None).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn unlock_without_token_is_bad_request_wrong_token_is_conflict() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/file.txt", "v1", None).await,
+            StatusCode::CREATED
+        );
+        let (status, token) = lock(&server, "/file.txt", "0").await;
+        assert_eq!(status, StatusCode::OK);
+        let token = token.expect("Lock-Token header");
+
+        let missing = server
+            .handle(
+                Request::builder()
+                    .method("UNLOCK")
+                    .uri("/file.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+
+        assert_eq!(
+            unlock(&server, "/file.txt", "<opaquelocktoken:garbage>").await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            unlock(&server, "/file.txt", &token).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn locked_resource_rejects_put_delete_move_without_token() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/file.txt", "v1", None).await,
+            StatusCode::CREATED
+        );
+        let (status, token) = lock(&server, "/file.txt", "0").await;
+        assert_eq!(status, StatusCode::OK);
+        let token = token.expect("Lock-Token header");
+
+        assert_eq!(
+            put(&server, "/file.txt", "v2", None).await,
+            StatusCode::LOCKED
+        );
+
+        let delete = server
+            .handle(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/file.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(delete.status(), StatusCode::LOCKED);
+
+        let mv = server
+            .handle(
+                Request::builder()
+                    .method("MOVE")
+                    .uri("/file.txt")
+                    .header("Destination", "/moved.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(mv.status(), StatusCode::LOCKED);
+
+        assert_eq!(
+            put(&server, "/file.txt", "v2", Some(&format!("({token})"))).await,
+            StatusCode::NO_CONTENT
+        );
+        let delete_ok = server
+            .handle(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/file.txt")
+                    .header("If", format!("({token})"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(delete_ok.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn copy_to_locked_destination_is_locked() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/src.txt", "src", None).await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            put(&server, "/dst.txt", "dst", None).await,
+            StatusCode::CREATED
+        );
+        let (status, token) = lock(&server, "/dst.txt", "0").await;
+        assert_eq!(status, StatusCode::OK);
+        let token = token.expect("Lock-Token header");
+
+        let copy = server
+            .handle(
+                Request::builder()
+                    .method("COPY")
+                    .uri("/src.txt")
+                    .header("Destination", "/dst.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(copy.status(), StatusCode::LOCKED);
+
+        let copy_ok = server
+            .handle(
+                Request::builder()
+                    .method("COPY")
+                    .uri("/src.txt")
+                    .header("Destination", "/dst.txt")
+                    .header("If", format!("<http://example.com/dst.txt> ({token})"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(copy_ok.status(), StatusCode::NO_CONTENT);
+    }
 }
 
 #[cfg(all(unix, feature = "localfs"))]
@@ -2740,5 +2908,342 @@ mod memfs_path_tests {
         assert!(meta.is_dir(), "/dir should still be a collection");
         let file_meta = fs.metadata(&file).await.unwrap();
         assert!(!file_meta.is_dir());
+    }
+}
+
+#[cfg(feature = "memfs")]
+mod partial_put_tests {
+    use dav_server::{DavHandler, body::Body, fakels::FakeLs, memfs::MemFs};
+    use http::{Request, StatusCode};
+
+    const SABRE: &str = "application/x-sabredav-partialupdate";
+    const BASE: &str = "1234567890";
+
+    fn setup() -> DavHandler {
+        DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .build_handler()
+    }
+
+    async fn resp_to_string(mut resp: http::Response<Body>) -> String {
+        use futures_util::StreamExt;
+
+        let mut data = Vec::new();
+        let body = resp.body_mut();
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => data.extend_from_slice(&bytes),
+                Err(e) => panic!("Error reading body stream: {e}"),
+            }
+        }
+        String::from_utf8(data).unwrap_or_default()
+    }
+
+    async fn put(server: &DavHandler, uri: &str, body: &str) -> StatusCode {
+        server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .status()
+    }
+
+    async fn get_body(server: &DavHandler, uri: &str) -> (StatusCode, String) {
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        (resp.status(), resp_to_string(resp).await)
+    }
+
+    async fn patch(
+        server: &DavHandler,
+        uri: &str,
+        range: &str,
+        body: &str,
+    ) -> http::Response<Body> {
+        server
+            .handle(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(uri)
+                    .header("Content-Type", SABRE)
+                    .header("X-Update-Range", range)
+                    .header("Content-Length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn patch_from_to_overwrites_inclusive_range() {
+        let server = setup();
+        assert_eq!(put(&server, "/file.txt", BASE).await, StatusCode::CREATED);
+        let resp = patch(&server, "/file.txt", "bytes=0-3", "----").await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let (status, body) = get_body(&server, "/file.txt").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "----567890");
+    }
+
+    #[tokio::test]
+    async fn patch_all_from_and_last_and_append() {
+        let server = setup();
+        assert_eq!(put(&server, "/from.txt", BASE).await, StatusCode::CREATED);
+        let resp = patch(&server, "/from.txt", "bytes=2-", "----").await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(get_body(&server, "/from.txt").await.1, "12----7890");
+
+        assert_eq!(put(&server, "/last.txt", BASE).await, StatusCode::CREATED);
+        let resp = patch(&server, "/last.txt", "bytes=-4", "----").await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(get_body(&server, "/last.txt").await.1, "123456----");
+
+        assert_eq!(put(&server, "/append.txt", BASE).await, StatusCode::CREATED);
+        let resp = patch(&server, "/append.txt", "append", "----").await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(get_body(&server, "/append.txt").await.1, "1234567890----");
+    }
+
+    #[tokio::test]
+    async fn patch_error_statuses() {
+        let server = setup();
+        assert_eq!(put(&server, "/file.txt", BASE).await, StatusCode::CREATED);
+
+        let wrong_type = server
+            .handle(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/file.txt")
+                    .header("Content-Type", "text/plain")
+                    .header("X-Update-Range", "bytes=0-3")
+                    .header("Content-Length", "4")
+                    .body(Body::from("----"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(wrong_type.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        let no_length = server
+            .handle(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/file.txt")
+                    .header("Content-Type", SABRE)
+                    .header("X-Update-Range", "bytes=0-3")
+                    .body(Body::from("----"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(no_length.status(), StatusCode::LENGTH_REQUIRED);
+
+        let no_range = server
+            .handle(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/file.txt")
+                    .header("Content-Type", SABRE)
+                    .header("Content-Length", "4")
+                    .body(Body::from("----"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(no_range.status(), StatusCode::BAD_REQUEST);
+
+        let length_mismatch = patch(&server, "/file.txt", "bytes=0-3", "-----").await;
+        assert_eq!(length_mismatch.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+
+        let inverted = patch(&server, "/file.txt", "bytes=6-3", "----").await;
+        assert_eq!(inverted.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+
+        let last_too_long = patch(&server, "/file.txt", "bytes=-20", "----").await;
+        assert_eq!(last_too_long.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    }
+
+    #[tokio::test]
+    async fn patch_on_collection_is_method_not_allowed() {
+        let server = setup();
+        let mkcol = server
+            .handle(
+                Request::builder()
+                    .method("MKCOL")
+                    .uri("/dir")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(mkcol.status(), StatusCode::CREATED);
+
+        let resp = patch(&server, "/dir", "bytes=0-3", "----").await;
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn apache_put_content_range_updates_bytes() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/file.txt", "hello world").await,
+            StatusCode::CREATED
+        );
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/file.txt")
+                    .header("Content-Range", "bytes 3-6/*")
+                    .header("Content-Length", "4")
+                    .body(Body::from("ABCD"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(get_body(&server, "/file.txt").await.1, "helABCDorld");
+    }
+
+    #[tokio::test]
+    async fn apache_put_content_range_errors() {
+        let server = setup();
+        assert_eq!(put(&server, "/file.txt", BASE).await, StatusCode::CREATED);
+
+        let inverted = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/file.txt")
+                    .header("Content-Range", "bytes 6-3/*")
+                    .header("Content-Length", "4")
+                    .body(Body::from("----"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(inverted.status(), StatusCode::BAD_REQUEST);
+
+        let length_mismatch = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/file.txt")
+                    .header("Content-Range", "bytes 0-3/*")
+                    .header("Content-Length", "5")
+                    .body(Body::from("-----"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(length_mismatch.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+
+        let invalid = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/file.txt")
+                    .header("Content-Range", "not-a-range")
+                    .body(Body::from("----"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[cfg(feature = "memfs")]
+mod conditional_put_tests {
+    use dav_server::{DavHandler, body::Body, fakels::FakeLs, memfs::MemFs};
+    use http::{Request, StatusCode};
+
+    fn setup() -> DavHandler {
+        DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .build_handler()
+    }
+
+    async fn put_star(server: &DavHandler, uri: &str, body: &str, header_name: &str) -> StatusCode {
+        server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header(header_name, "*")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .status()
+    }
+
+    async fn get_body(server: &DavHandler, uri: &str) -> String {
+        use futures_util::StreamExt;
+
+        let mut resp = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        let mut data = Vec::new();
+        let body = resp.body_mut();
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => data.extend_from_slice(&bytes),
+                Err(e) => panic!("Error reading body stream: {e}"),
+            }
+        }
+        String::from_utf8(data).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn if_none_match_star_is_create_only() {
+        let server = setup();
+        assert_eq!(
+            put_star(&server, "/file.txt", "v1", "If-None-Match").await,
+            StatusCode::CREATED
+        );
+        assert_eq!(get_body(&server, "/file.txt").await, "v1");
+        assert_eq!(
+            put_star(&server, "/file.txt", "v2", "If-None-Match").await,
+            StatusCode::PRECONDITION_FAILED
+        );
+        assert_eq!(get_body(&server, "/file.txt").await, "v1");
+    }
+
+    #[tokio::test]
+    async fn if_match_star_is_update_only() {
+        let server = setup();
+        assert_eq!(
+            put_star(&server, "/file.txt", "v1", "If-Match").await,
+            StatusCode::PRECONDITION_FAILED
+        );
+
+        let created = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/file.txt")
+                    .body(Body::from("v1"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        assert_eq!(
+            put_star(&server, "/file.txt", "v2", "If-Match").await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(get_body(&server, "/file.txt").await, "v2");
     }
 }
