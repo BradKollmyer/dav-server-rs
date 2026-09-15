@@ -555,6 +555,82 @@ END:VCARD"#;
     }
 
     #[tokio::test]
+    async fn test_addressbook_query_tel_param_filter_type_home() {
+        let server = setup_carddav_server();
+
+        let req = Request::builder()
+            .method("MKADDRESSBOOK")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::empty())
+            .unwrap();
+        let _ = server.handle(req).await;
+
+        let home = r#"BEGIN:VCARD
+VERSION:3.0
+UID:tel-home@example.com
+FN:Home Contact
+TEL;TYPE=HOME:1
+END:VCARD"#;
+
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/addressbooks/my-contacts/home.vcf")
+            .header("Content-Type", "text/vcard")
+            .body(Body::from(home))
+            .unwrap();
+        let _ = server.handle(req).await;
+
+        let work = r#"BEGIN:VCARD
+VERSION:3.0
+UID:tel-work@example.com
+FN:Work Contact
+TEL;TYPE=WORK:1
+END:VCARD"#;
+
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/addressbooks/my-contacts/work.vcf")
+            .header("Content-Type", "text/vcard")
+            .body(Body::from(work))
+            .unwrap();
+        let _ = server.handle(req).await;
+
+        let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<CARD:addressbook-query xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
+  <D:prop>
+    <CARD:address-data/>
+  </D:prop>
+  <CARD:filter>
+    <CARD:prop-filter name="TEL">
+      <CARD:param-filter name="TYPE">
+        <CARD:text-match collation="i;unicode-casemap" match-type="equals">HOME</CARD:text-match>
+      </CARD:param-filter>
+    </CARD:prop-filter>
+  </CARD:filter>
+</CARD:addressbook-query>"#;
+
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/addressbooks/my-contacts")
+            .header("Depth", "1")
+            .body(Body::from(report_body))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("Home Contact"),
+            "HOME TEL missing: {body_str}"
+        );
+        assert!(
+            !body_str.contains("Work Contact"),
+            "WORK TEL must not match TYPE=HOME param-filter: {body_str}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_addressbook_multiget_report() {
         let server = setup_carddav_server().await;
 

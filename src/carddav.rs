@@ -11,7 +11,7 @@
 //! members are skipped.
 
 #[cfg(feature = "carddav")]
-use calcard::vcard::{VCard, VCardValue};
+use calcard::vcard::{VCard, VCardEntry, VCardParameterValue, VCardValue};
 use xmltree::Element;
 
 use crate::davpath::DavPath;
@@ -153,7 +153,7 @@ pub fn is_vcard_data(content: &[u8]) -> bool {
 /// Evaluate an `addressbook-query` filter against vCard text.
 ///
 /// Unparseable data does not match (the REPORT skips that resource).
-/// `param-filter` is ignored; matching is property-scoped `text-match` only.
+/// Matching is property-scoped `text-match` plus optional `param-filter`.
 #[cfg(feature = "carddav")]
 pub(crate) fn addressbook_matches_query(content: &str, query: &AddressBookQuery) -> bool {
     let Some(pf) = query.prop_filter.as_ref() else {
@@ -167,23 +167,71 @@ pub(crate) fn addressbook_matches_query(content: &str, query: &AddressBookQuery)
 
 #[cfg(feature = "carddav")]
 fn vcard_matches_prop_filter(vcard: &VCard, pf: &PropertyFilter) -> bool {
-    let values: Vec<String> = vcard
+    let entries: Vec<&VCardEntry> = vcard
         .entries
         .iter()
         .filter(|e| e.name.as_str().eq_ignore_ascii_case(&pf.name))
-        .flat_map(|e| e.values.iter().filter_map(vcard_value_text))
         .collect();
     if pf.is_not_defined {
+        return entries.is_empty();
+    }
+    if entries.is_empty() {
+        return false;
+    }
+    if pf.param_filters.is_empty() {
+        let values: Vec<String> = entries
+            .iter()
+            .flat_map(|e| e.values.iter().filter_map(vcard_value_text))
+            .collect();
+        if values.is_empty() {
+            return false;
+        }
+        return match &pf.text_match {
+            Some(tm) => text_match_any(&values, tm),
+            None => true,
+        };
+    }
+    entries
+        .iter()
+        .any(|entry| vcard_entry_matches_prop_filter(entry, pf))
+}
+
+/// One property instance matches when every param-filter matches that instance
+/// and the optional property `text-match` matches its values.
+#[cfg(feature = "carddav")]
+fn vcard_entry_matches_prop_filter(entry: &VCardEntry, pf: &PropertyFilter) -> bool {
+    if !pf
+        .param_filters
+        .iter()
+        .all(|paf| vcard_entry_matches_param_filter(entry, paf))
+    {
+        return false;
+    }
+    match &pf.text_match {
+        Some(tm) => {
+            let values: Vec<String> = entry.values.iter().filter_map(vcard_value_text).collect();
+            text_match_any(&values, tm)
+        }
+        None => true,
+    }
+}
+
+#[cfg(feature = "carddav")]
+fn vcard_entry_matches_param_filter(entry: &VCardEntry, paf: &ParameterFilter) -> bool {
+    let values: Vec<String> = entry
+        .params
+        .iter()
+        .filter(|p| p.name.as_str().eq_ignore_ascii_case(&paf.name))
+        .map(|p| vcard_param_value_text(&p.value))
+        .collect();
+    if paf.is_not_defined {
         return values.is_empty();
     }
     if values.is_empty() {
         return false;
     }
-    match &pf.text_match {
-        Some(tm) => {
-            let any = values.iter().any(|v| text_matches_core(v, tm));
-            if tm.negate_condition { !any } else { any }
-        }
+    match &paf.text_match {
+        Some(tm) => text_match_any(&values, tm),
         None => true,
     }
 }
@@ -198,6 +246,17 @@ fn vcard_value_text(value: &VCardValue) -> Option<String> {
         VCardValue::Component(parts) => Some(parts.join(";")),
         other => other.as_text().map(str::to_string),
     }
+}
+
+#[cfg(feature = "carddav")]
+fn vcard_param_value_text(value: &VCardParameterValue) -> String {
+    value.clone().into_text().into_owned()
+}
+
+#[cfg(feature = "carddav")]
+fn text_match_any(values: &[String], tm: &TextMatch) -> bool {
+    let any = values.iter().any(|v| text_matches_core(v, tm));
+    if tm.negate_condition { !any } else { any }
 }
 
 #[cfg(feature = "carddav")]
@@ -345,6 +404,28 @@ mod tests {
         }
     }
 
+    fn tel_type_query(param_text: &str) -> AddressBookQuery {
+        AddressBookQuery {
+            prop_filter: Some(PropertyFilter {
+                name: "TEL".into(),
+                is_not_defined: false,
+                text_match: None,
+                param_filters: vec![ParameterFilter {
+                    name: "TYPE".into(),
+                    is_not_defined: false,
+                    text_match: Some(TextMatch {
+                        text: param_text.into(),
+                        collation: Some("i;unicode-casemap".into()),
+                        negate_condition: false,
+                        match_type: Some("equals".into()),
+                    }),
+                }],
+            }),
+            properties: Vec::new(),
+            limit: None,
+        }
+    }
+
     #[test]
     fn unparseable_vcard_does_not_match() {
         assert!(!addressbook_matches_query(
@@ -382,6 +463,15 @@ mod tests {
             vcard,
             &email_query("John", "contains", true)
         ));
+    }
+
+    #[test]
+    fn tel_param_filter_matches_type_on_same_instance() {
+        let home = "BEGIN:VCARD\nVERSION:3.0\nFN:Home\nTEL;TYPE=HOME:1\nEND:VCARD";
+        let work = "BEGIN:VCARD\nVERSION:3.0\nFN:Work\nTEL;TYPE=WORK:1\nEND:VCARD";
+        let query = tel_type_query("HOME");
+        assert!(addressbook_matches_query(home, &query));
+        assert!(!addressbook_matches_query(work, &query));
     }
 
     fn dav_path(p: &str) -> DavPath {
