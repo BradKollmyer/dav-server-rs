@@ -1409,6 +1409,31 @@ END:VCALENDAR"#
             .unwrap();
         let resp = server.handle(req).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // RFC 4791 9.9: start must precede end and both must be UTC DATE-TIME.
+        for (start, end) in [
+            ("20240201T000000Z", "20240101T000000Z"),
+            ("20240101T000000", "20240201T000000Z"),
+            ("20240101", "20240201"),
+        ] {
+            let bad_range = format!(
+                r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:free-busy-query xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <C:time-range start="{start}" end="{end}"/>
+</C:free-busy-query>"#
+            );
+            let req = Request::builder()
+                .method("REPORT")
+                .uri("/calendars/my-calendar")
+                .body(Body::from(bad_range))
+                .unwrap();
+            let resp = server.handle(req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "time-range {start}/{end} must be rejected"
+            );
+        }
     }
 
     #[tokio::test]

@@ -572,13 +572,69 @@ pub(crate) fn format_caldav_utc(dt: DateTime<Utc>) -> String {
     dt.format("%Y%m%dT%H%M%SZ").to_string()
 }
 
-/// Both `time-range` start and end must parse as CalDAV DATE/DATE-TIME.
+/// RFC 4791 9.9: a free-busy-query `time-range` needs both `start` and `end`
+/// as UTC DATE-TIME values, with `start` before `end`.
 #[cfg(feature = "caldav")]
 pub(crate) fn parse_freebusy_bounds(tr: &TimeRange) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    Some((
-        parse_caldav_date_time(tr.start.as_deref()?)?,
-        parse_caldav_date_time(tr.end.as_deref()?)?,
-    ))
+    let start = parse_utc_date_time(tr.start.as_deref()?)?;
+    let end = parse_utc_date_time(tr.end.as_deref()?)?;
+    (start < end).then_some((start, end))
+}
+
+/// RFC 5545 UTC DATE-TIME (`YYYYMMDDTHHMMSSZ`) only; floating and DATE values
+/// are rejected.
+#[cfg(feature = "caldav")]
+fn parse_utc_date_time(s: &str) -> Option<DateTime<Utc>> {
+    NaiveDateTime::parse_from_str(s.trim(), "%Y%m%dT%H%M%SZ")
+        .ok()
+        .map(|ndt| ndt.and_utc())
+}
+
+/// RFC 5545 FBTYPE of a reported busy period. FREE periods are never reported.
+#[cfg(feature = "caldav")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum FreeBusyType {
+    Busy,
+    BusyTentative,
+    BusyUnavailable,
+}
+
+#[cfg(feature = "caldav")]
+impl FreeBusyType {
+    /// From an FBTYPE parameter value; `None` for FREE. A missing or
+    /// unrecognized value is BUSY per RFC 5545 3.2.9.
+    fn from_fbtype(value: Option<&str>) -> Option<Self> {
+        let Some(value) = value else {
+            return Some(FreeBusyType::Busy);
+        };
+        if value.eq_ignore_ascii_case("FREE") {
+            None
+        } else if value.eq_ignore_ascii_case("BUSY-TENTATIVE") {
+            Some(FreeBusyType::BusyTentative)
+        } else if value.eq_ignore_ascii_case("BUSY-UNAVAILABLE") {
+            Some(FreeBusyType::BusyUnavailable)
+        } else {
+            Some(FreeBusyType::Busy)
+        }
+    }
+
+    /// FBTYPE parameter to emit, or `None` for the BUSY default.
+    fn fbtype_param(self) -> Option<&'static str> {
+        match self {
+            FreeBusyType::Busy => None,
+            FreeBusyType::BusyTentative => Some("BUSY-TENTATIVE"),
+            FreeBusyType::BusyUnavailable => Some("BUSY-UNAVAILABLE"),
+        }
+    }
+}
+
+/// One `[start, end)` busy period and how it is reported.
+#[cfg(feature = "caldav")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BusyInterval {
+    pub(crate) start: DateTime<Utc>,
+    pub(crate) end: DateTime<Utc>,
+    pub(crate) fbtype: FreeBusyType,
 }
 
 /// Busy intervals from overlapping opaque VEVENT and VFREEBUSY FREEBUSY periods.
@@ -588,18 +644,18 @@ pub(crate) fn calendar_busy_intervals(
     calendar: &Calendar,
     range_start: DateTime<Utc>,
     range_end: DateTime<Utc>,
-) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+) -> Vec<BusyInterval> {
     let mut busy = Vec::new();
     for comp in &calendar.components {
         match comp {
             CalendarComponent::Event(event) => {
-                if component_is_transparent(event) {
+                let Some(fbtype) = event_busy_type(event) else {
                     continue;
-                }
+                };
                 if let Some((start, end)) = component_span(event)
                     && time_spans_overlap(start, end, Some(range_start), Some(range_end))
                 {
-                    busy.push((start, end));
+                    busy.push(BusyInterval { start, end, fbtype });
                 }
             }
             CalendarComponent::Other(other)
@@ -613,14 +669,28 @@ pub(crate) fn calendar_busy_intervals(
     busy
 }
 
+/// RFC 4791 7.10: TRANSPARENT and CANCELLED events contribute no busy time;
+/// TENTATIVE events are BUSY-TENTATIVE.
 #[cfg(feature = "caldav")]
-fn component_is_transparent<C: Component>(comp: &C) -> bool {
-    for (key, prop) in comp.properties() {
-        if key.eq_ignore_ascii_case("TRANSP") {
-            return prop.value().eq_ignore_ascii_case("TRANSPARENT");
-        }
+fn event_busy_type<C: Component>(comp: &C) -> Option<FreeBusyType> {
+    if property_value(comp, "TRANSP").is_some_and(|v| v.eq_ignore_ascii_case("TRANSPARENT")) {
+        return None;
     }
-    false
+    match property_value(comp, "STATUS") {
+        Some(status) if status.eq_ignore_ascii_case("CANCELLED") => None,
+        Some(status) if status.eq_ignore_ascii_case("TENTATIVE") => {
+            Some(FreeBusyType::BusyTentative)
+        }
+        _ => Some(FreeBusyType::Busy),
+    }
+}
+
+#[cfg(feature = "caldav")]
+fn property_value<'a, C: Component>(comp: &'a C, name: &str) -> Option<&'a str> {
+    comp.properties()
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, prop)| prop.value())
 }
 
 #[cfg(feature = "caldav")]
@@ -628,7 +698,7 @@ fn collect_vfreebusy_periods<C: Component>(
     comp: &C,
     range_start: DateTime<Utc>,
     range_end: DateTime<Utc>,
-    busy: &mut Vec<(DateTime<Utc>, DateTime<Utc>)>,
+    busy: &mut Vec<BusyInterval>,
 ) {
     let mut props: Vec<&Property> = Vec::new();
     for (key, prop) in comp.properties() {
@@ -642,50 +712,53 @@ fn collect_vfreebusy_periods<C: Component>(
         }
     }
     for prop in props {
-        if freebusy_fbtype_is_free(prop) {
+        let Some(fbtype) = FreeBusyType::from_fbtype(freebusy_fbtype(prop)) else {
             continue;
-        }
+        };
         for period in prop.value().split(',') {
             if let Some((start, end)) = parse_freebusy_period(period)
                 && time_spans_overlap(start, end, Some(range_start), Some(range_end))
             {
-                busy.push((start, end));
+                busy.push(BusyInterval { start, end, fbtype });
             }
         }
     }
 }
 
 #[cfg(feature = "caldav")]
-fn freebusy_fbtype_is_free(prop: &Property) -> bool {
+fn freebusy_fbtype(prop: &Property) -> Option<&str> {
     prop.params()
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("FBTYPE"))
-        .is_some_and(|(_, p)| p.value().eq_ignore_ascii_case("FREE"))
+        .map(|(_, p)| p.value())
 }
 
+/// RFC 5545 PERIOD in either `start/end` or `start/duration` form.
 #[cfg(feature = "caldav")]
 fn parse_freebusy_period(period: &str) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let (start, end) = period.split_once('/')?;
-    Some((
-        parse_caldav_date_time(start.trim())?,
-        parse_caldav_date_time(end.trim())?,
-    ))
+    let start = parse_caldav_date_time(start.trim())?;
+    let end = match parse_caldav_date_time(end.trim()) {
+        Some(end) => end,
+        None => start.checked_add_signed(parse_ical_duration(end)?)?,
+    };
+    (start <= end).then_some((start, end))
 }
 
+/// Coalesce overlapping and touching intervals of the same FBTYPE; intervals
+/// of different types are never merged. The result is ordered by start.
 #[cfg(feature = "caldav")]
-pub(crate) fn merge_busy_intervals(
-    mut intervals: Vec<(DateTime<Utc>, DateTime<Utc>)>,
-) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+pub(crate) fn merge_busy_intervals(mut intervals: Vec<BusyInterval>) -> Vec<BusyInterval> {
     if intervals.len() <= 1 {
         return intervals;
     }
-    intervals.sort_by_key(|(start, _)| *start);
-    let mut merged = Vec::with_capacity(intervals.len());
+    intervals.sort_by_key(|iv| (iv.fbtype, iv.start));
+    let mut merged: Vec<BusyInterval> = Vec::with_capacity(intervals.len());
     let mut current = intervals[0];
     for next in intervals.into_iter().skip(1) {
-        if next.0 <= current.1 {
-            if next.1 > current.1 {
-                current.1 = next.1;
+        if next.fbtype == current.fbtype && next.start <= current.end {
+            if next.end > current.end {
+                current.end = next.end;
             }
         } else {
             merged.push(current);
@@ -693,6 +766,7 @@ pub(crate) fn merge_busy_intervals(
         }
     }
     merged.push(current);
+    merged.sort_by_key(|iv| (iv.start, iv.fbtype));
     merged
 }
 
@@ -702,7 +776,7 @@ pub(crate) fn merge_busy_intervals(
 pub(crate) fn freebusy_calendar(
     range_start: DateTime<Utc>,
     range_end: DateTime<Utc>,
-    busy: &[(DateTime<Utc>, DateTime<Utc>)],
+    busy: &[BusyInterval],
 ) -> String {
     let mut ics = String::from(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//dav-server//CalDAV//EN\r\nBEGIN:VFREEBUSY\r\n",
@@ -716,11 +790,16 @@ pub(crate) fn freebusy_calendar(
     ics.push_str("\r\nDTEND:");
     ics.push_str(&format_caldav_utc(range_end));
     ics.push_str("\r\n");
-    for (start, end) in busy {
-        ics.push_str("FREEBUSY:");
-        ics.push_str(&format_caldav_utc(*start));
+    for iv in busy {
+        ics.push_str("FREEBUSY");
+        if let Some(fbtype) = iv.fbtype.fbtype_param() {
+            ics.push_str(";FBTYPE=");
+            ics.push_str(fbtype);
+        }
+        ics.push(':');
+        ics.push_str(&format_caldav_utc(iv.start));
         ics.push('/');
-        ics.push_str(&format_caldav_utc(*end));
+        ics.push_str(&format_caldav_utc(iv.end));
         ics.push_str("\r\n");
     }
     ics.push_str("END:VFREEBUSY\r\nEND:VCALENDAR\r\n");
@@ -1044,9 +1123,10 @@ mod tests {
         ));
         assert_eq!(
             calendar_busy_intervals(&cal, start, end),
-            vec![(
-                parse_caldav_date_time("20240615T160000Z").unwrap(),
-                parse_caldav_date_time("20240615T170000Z").unwrap(),
+            vec![busy(
+                "20240615T160000Z",
+                "20240615T170000Z",
+                FreeBusyType::Busy
             )]
         );
     }
@@ -1131,14 +1211,58 @@ mod tests {
     }
 
     #[test]
+    fn freebusy_bounds_reject_inverted_and_non_utc_ranges() {
+        // start must precede end
+        assert!(
+            parse_freebusy_bounds(&TimeRange {
+                start: Some("20240201T000000Z".into()),
+                end: Some("20240101T000000Z".into()),
+            })
+            .is_none()
+        );
+        assert!(
+            parse_freebusy_bounds(&TimeRange {
+                start: Some("20240101T000000Z".into()),
+                end: Some("20240101T000000Z".into()),
+            })
+            .is_none()
+        );
+        // floating DATE-TIME
+        assert!(
+            parse_freebusy_bounds(&TimeRange {
+                start: Some("20240101T000000".into()),
+                end: Some("20240201T000000Z".into()),
+            })
+            .is_none()
+        );
+        // DATE only
+        assert!(
+            parse_freebusy_bounds(&TimeRange {
+                start: Some("20240101T000000Z".into()),
+                end: Some("20240201".into()),
+            })
+            .is_none()
+        );
+    }
+
+    fn busy(start: &str, end: &str, fbtype: FreeBusyType) -> BusyInterval {
+        BusyInterval {
+            start: parse_caldav_date_time(start).unwrap(),
+            end: parse_caldav_date_time(end).unwrap(),
+            fbtype,
+        }
+    }
+
+    #[test]
     fn opaque_vevent_in_range_is_busy() {
         let (start, end) = jan_range();
         let cal = parse_ics(&vevent_ics("Busy", "20240101T120000Z", "20240101T130000Z"));
         assert_eq!(
             calendar_busy_intervals(&cal, start, end),
-            vec![(
-                parse_caldav_date_time("20240101T120000Z").unwrap(),
-                parse_caldav_date_time("20240101T130000Z").unwrap(),
+            vec![busy(
+                "20240101T120000Z",
+                "20240101T130000Z",
+                FreeBusyType::Busy
             )]
         );
     }
@@ -1189,9 +1313,10 @@ mod tests {
                 parse_caldav_date_time("20240615T000000Z").unwrap(),
                 parse_caldav_date_time("20240616T000000Z").unwrap(),
             ),
-            vec![(
-                parse_caldav_date_time("20240615T120000Z").unwrap(),
-                parse_caldav_date_time("20240615T140000Z").unwrap(),
+            vec![busy(
+                "20240615T120000Z",
+                "20240615T140000Z",
+                FreeBusyType::Busy
             )]
         );
     }
@@ -1230,17 +1355,139 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_vevent_is_not_busy() {
+        let (start, end) = jan_range();
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:1\nDTSTART:20240101T120000Z\nDTEND:20240101T130000Z\nSTATUS:CANCELLED\nEND:VEVENT\nEND:VCALENDAR";
+        let cal = parse_ics(ics);
+        assert!(calendar_busy_intervals(&cal, start, end).is_empty());
+    }
+
+    #[test]
+    fn tentative_vevent_is_busy_tentative() {
+        let (start, end) = jan_range();
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:1\nDTSTART:20240101T120000Z\nDTEND:20240101T130000Z\nSTATUS:TENTATIVE\nEND:VEVENT\nEND:VCALENDAR";
+        let cal = parse_ics(ics);
+        let intervals = calendar_busy_intervals(&cal, start, end);
+        assert_eq!(
+            intervals,
+            vec![busy(
+                "20240101T120000Z",
+                "20240101T130000Z",
+                FreeBusyType::BusyTentative
+            )]
+        );
+        let out = freebusy_calendar(start, end, &intervals);
+        assert!(
+            out.contains("FREEBUSY;FBTYPE=BUSY-TENTATIVE:20240101T120000Z/20240101T130000Z\r\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn vfreebusy_period_is_busy_when_overlapping() {
         let (start, end) = jan_range();
         let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VFREEBUSY\nUID:fb\nFREEBUSY:20240101T150000Z/20240101T160000Z\nEND:VFREEBUSY\nEND:VCALENDAR";
         let cal = parse_ics(ics);
         assert_eq!(
             calendar_busy_intervals(&cal, start, end),
-            vec![(
-                parse_caldav_date_time("20240101T150000Z").unwrap(),
-                parse_caldav_date_time("20240101T160000Z").unwrap(),
+            vec![busy(
+                "20240101T150000Z",
+                "20240101T160000Z",
+                FreeBusyType::Busy
             )]
         );
+    }
+
+    #[test]
+    fn vfreebusy_unavailable_keeps_type_and_is_not_merged_into_busy() {
+        let (start, end) = jan_range();
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VFREEBUSY\nUID:fb\nFREEBUSY:20240101T150000Z/20240101T160000Z\nFREEBUSY;FBTYPE=BUSY-UNAVAILABLE:20240101T160000Z/20240101T170000Z\nFREEBUSY;FBTYPE=FREE:20240101T170000Z/20240101T180000Z\nEND:VFREEBUSY\nEND:VCALENDAR";
+        let cal = parse_ics(ics);
+        let merged = merge_busy_intervals(calendar_busy_intervals(&cal, start, end));
+        assert_eq!(
+            merged,
+            vec![
+                busy("20240101T150000Z", "20240101T160000Z", FreeBusyType::Busy),
+                busy(
+                    "20240101T160000Z",
+                    "20240101T170000Z",
+                    FreeBusyType::BusyUnavailable
+                ),
+            ]
+        );
+        let out = freebusy_calendar(start, end, &merged);
+        assert!(
+            out.contains("FREEBUSY:20240101T150000Z/20240101T160000Z\r\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("FREEBUSY;FBTYPE=BUSY-UNAVAILABLE:20240101T160000Z/20240101T170000Z\r\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn merge_coalesces_same_type_only() {
+        let merged = merge_busy_intervals(vec![
+            busy("20240101T120000Z", "20240101T130000Z", FreeBusyType::Busy),
+            busy(
+                "20240101T123000Z",
+                "20240101T140000Z",
+                FreeBusyType::BusyTentative,
+            ),
+            busy("20240101T124500Z", "20240101T133000Z", FreeBusyType::Busy),
+        ]);
+        assert_eq!(
+            merged,
+            vec![
+                busy("20240101T120000Z", "20240101T133000Z", FreeBusyType::Busy),
+                busy(
+                    "20240101T123000Z",
+                    "20240101T140000Z",
+                    FreeBusyType::BusyTentative
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn vfreebusy_start_duration_period_is_parsed() {
+        let (start, end) = jan_range();
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VFREEBUSY\nUID:fb\nFREEBUSY:20240101T150000Z/PT1H\nEND:VFREEBUSY\nEND:VCALENDAR";
+        let cal = parse_ics(ics);
+        assert_eq!(
+            calendar_busy_intervals(&cal, start, end),
+            vec![busy(
+                "20240101T150000Z",
+                "20240101T160000Z",
+                FreeBusyType::Busy
+            )]
+        );
+    }
+
+    #[test]
+    fn ical_duration_parsing() {
+        assert_eq!(parse_ical_duration("PT1H"), Some(TimeDelta::hours(1)));
+        assert_eq!(
+            parse_ical_duration("P1DT2H30M15S"),
+            Some(
+                TimeDelta::days(1)
+                    + TimeDelta::hours(2)
+                    + TimeDelta::minutes(30)
+                    + TimeDelta::seconds(15)
+            )
+        );
+        assert_eq!(parse_ical_duration("P2W"), Some(TimeDelta::weeks(2)));
+        assert_eq!(parse_ical_duration("-PT15M"), Some(TimeDelta::minutes(-15)));
+        assert_eq!(parse_ical_duration("+P1D"), Some(TimeDelta::days(1)));
+        assert_eq!(parse_ical_duration("P"), None);
+        assert_eq!(parse_ical_duration("PT"), None);
+        assert_eq!(parse_ical_duration("P1H"), None);
+        assert_eq!(parse_ical_duration("PT1D"), None);
+        assert_eq!(parse_ical_duration("1H"), None);
+        assert_eq!(parse_ical_duration("PT99999999999999999999H"), None);
+        // negative duration yields an inverted period, which is dropped
+        assert_eq!(parse_freebusy_period("20240101T150000Z/-PT1H"), None);
     }
 }
 
