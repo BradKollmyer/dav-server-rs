@@ -41,9 +41,14 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         // lock refresh?
         if xmldata.is_empty() {
-            // get locktoken
-            let (_, tokens) =
+            // RFC4918 9.10.2 identifies the lock by a successful If match,
+            // not by "exactly one collected token" (DAV: tokens are not locks).
+            let (if_ok, mut tokens) =
                 dav_if_match(req, self.fs.as_ref(), &self.ls, &path, &self.credentials).await;
+            if !if_ok {
+                return Err(SC::PRECONDITION_FAILED.into());
+            }
+            tokens.retain(|t| !t.starts_with("DAV:"));
             if tokens.len() != 1 {
                 return Err(SC::BAD_REQUEST.into());
             }

@@ -926,6 +926,75 @@ mod if_state_token_tests {
         );
     }
 
+    async fn lock_refresh(server: &DavHandler, uri: &str, if_header: &str) -> StatusCode {
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("LOCK")
+                    .uri(uri)
+                    .header("If", if_header)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        resp.status()
+    }
+
+    #[tokio::test]
+    async fn lock_refresh_with_real_token_succeeds() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/file.txt", "v1", None).await,
+            StatusCode::CREATED
+        );
+        let (status, token) = lock(&server, "/file.txt", "0").await;
+        assert_eq!(status, StatusCode::OK);
+        let token = token.expect("Lock-Token header");
+
+        assert_eq!(
+            lock_refresh(&server, "/file.txt", &format!("({token})")).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn lock_refresh_with_garbage_token_is_precondition_failed() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/file.txt", "v1", None).await,
+            StatusCode::CREATED
+        );
+        let (status, _) = lock(&server, "/file.txt", "0").await;
+        assert_eq!(status, StatusCode::OK);
+
+        assert_eq!(
+            lock_refresh(&server, "/file.txt", "(<opaquelocktoken:garbage>)").await,
+            StatusCode::PRECONDITION_FAILED
+        );
+    }
+
+    #[tokio::test]
+    async fn lock_refresh_not_dav_no_lock_and_real_token_succeeds() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/file.txt", "v1", None).await,
+            StatusCode::CREATED
+        );
+        let (status, token) = lock(&server, "/file.txt", "0").await;
+        assert_eq!(status, StatusCode::OK);
+        let token = token.expect("Lock-Token header");
+
+        assert_eq!(
+            lock_refresh(
+                &server,
+                "/file.txt",
+                &format!("(Not <DAV:no-lock> {token})")
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
     #[tokio::test]
     async fn live_lock_token_allows_put() {
         let server = setup();
