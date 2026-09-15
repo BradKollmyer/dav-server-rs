@@ -253,6 +253,12 @@ struct QuotaCache {
     q_total: Option<u64>,
 }
 
+/// RFC 4331 quota-used-bytes and quota-available-bytes are the quota
+/// domain's used space and remaining space, the same for every resource.
+fn quota_bytes(q_used: u64, q_total: Option<u64>) -> (u64, Option<u64>) {
+    (q_used, q_total.map(|total| total.saturating_sub(q_used)))
+}
+
 #[cfg(any(feature = "caldav", feature = "carddav"))]
 fn supported_report_elem(prefix: &str, report: &str) -> Element {
     Element::new3(
@@ -926,11 +932,7 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
         })
     }
 
-    async fn get_quota<'a>(
-        &'a self,
-        qc: &'a mut QuotaCache,
-        meta: &'a dyn DavMetaData,
-    ) -> FsResult<(u64, Option<u64>)> {
+    async fn get_quota<'a>(&'a self, qc: &'a mut QuotaCache) -> FsResult<(u64, Option<u64>)> {
         // do lookup only once.
         match qc.q_state {
             0 => match self.fs.get_quota(&self.credentials).await {
@@ -948,12 +950,7 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
             _ => {}
         }
 
-        // if not "/", return for "used" just the size of this file/dir.
-        let used = if meta.is_dir() { qc.q_used } else { meta.len() };
-
-        // calculate available space.
-        let avail = qc.q_total.map(|total| total.saturating_sub(used));
-        Ok((used, avail))
+        Ok(quota_bytes(qc.q_used, qc.q_total))
     }
 
     async fn build_prop<'a>(
@@ -1100,12 +1097,12 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                         });
                     }
                     "quota-available-bytes" => {
-                        if let Ok((_, Some(avail))) = self.get_quota(qc, meta).await {
+                        if let Ok((_, Some(avail))) = self.get_quota(qc).await {
                             return self.build_elem(docontent, pfx, prop, avail.to_string());
                         }
                     }
                     "quota-used-bytes" => {
-                        if let Ok((used, _)) = self.get_quota(qc, meta).await {
+                        if let Ok((used, _)) = self.get_quota(qc).await {
                             let used = if self.useragent.contains("WebDAVFS") {
                                 // Need this on MacOs, otherwise the value is off
                                 // by a factor of 10 or so .. ?!?!!?
@@ -1572,4 +1569,37 @@ fn davprop_to_element(prop: DavProp) -> Element {
     elem.prefix = prop.prefix;
     elem.namespace = prop.namespace;
     elem
+}
+
+#[cfg(test)]
+mod quota_bytes_tests {
+    use super::quota_bytes;
+
+    #[test]
+    fn available_is_the_same_for_file_and_parent_dir() {
+        // Domain usage 100, total 1000. A 10-byte file must report the same
+        // available bytes as its parent (900), not total minus file length.
+        let q_used = 100;
+        let q_total = Some(1000);
+        let file_len = 10;
+
+        let (dir_used, dir_avail) = quota_bytes(q_used, q_total);
+        let (file_used, file_avail) = quota_bytes(q_used, q_total);
+
+        assert_eq!(dir_avail, file_avail);
+        assert_eq!(file_avail, Some(900));
+        assert_eq!(dir_used, file_used);
+        assert_eq!(file_used, q_used);
+        assert_ne!(file_avail, Some(q_total.unwrap() - file_len));
+    }
+
+    #[test]
+    fn available_saturates_when_used_exceeds_total() {
+        assert_eq!(quota_bytes(150, Some(100)), (150, Some(0)));
+    }
+
+    #[test]
+    fn available_is_none_when_total_is_unknown() {
+        assert_eq!(quota_bytes(50, None), (50, None));
+    }
 }
