@@ -910,6 +910,24 @@ impl DavDirEntry for LocalFsDirEntry {
     }
 }
 
+/// Read into spare capacity so `buf.len()` never covers uninitialized bytes.
+fn read_bytes_into(file: &mut impl Read, buf: &mut BytesMut, count: usize) -> io::Result<Bytes> {
+    buf.reserve(count);
+    let spare = buf.spare_capacity_mut();
+    let to_read = count.min(spare.len());
+    let n = {
+        // SAFETY: `Read::read` initializes the prefix it reports as written.
+        let dst =
+            unsafe { std::slice::from_raw_parts_mut(spare.as_mut_ptr().cast::<u8>(), to_read) };
+        file.read(dst)?
+    };
+    // SAFETY: `n` bytes of spare capacity were initialized by `read`.
+    unsafe {
+        buf.set_len(buf.len() + n);
+    }
+    Ok(buf.split().freeze())
+}
+
 impl DavFile for LocalFsFile {
     fn metadata(&'_ mut self) -> FsFuture<'_, Box<dyn DavMetaData>> {
         async move {
@@ -956,14 +974,7 @@ impl DavFile for LocalFsFile {
             let mut file = self.file.take().unwrap();
             let mut buf = mem::take(&mut self.buf);
             let (res, file, buf) = blocking(move || {
-                buf.reserve(count);
-                let res = unsafe {
-                    buf.set_len(count);
-                    file.read(&mut buf).map(|n| {
-                        buf.set_len(n);
-                        buf.split().freeze()
-                    })
-                };
+                let res = read_bytes_into(&mut file, &mut buf, count);
                 (res, file, buf)
             })
             .await;
@@ -1160,5 +1171,40 @@ mod tests {
         let fs = LocalFs::new(&base, false, false, false);
         let path = DavPath::new("/C:/Windows/win.ini").unwrap();
         assert_eq!(fs.fspath(&path), Err(FsError::Forbidden));
+    }
+
+    struct FailRead;
+
+    impl Read for FailRead {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("fail"))
+        }
+    }
+
+    struct PartialRead(usize);
+
+    impl Read for PartialRead {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.0.min(buf.len());
+            buf[..n].fill(b'x');
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn read_bytes_into_error_does_not_extend_len() {
+        let mut buf = BytesMut::new();
+        buf.reserve(32);
+        let err = read_bytes_into(&mut FailRead, &mut buf, 16).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn read_bytes_into_success_splits_initialized_bytes() {
+        let mut buf = BytesMut::new();
+        let bytes = read_bytes_into(&mut PartialRead(3), &mut buf, 16).unwrap();
+        assert_eq!(&bytes[..], b"xxx");
+        assert_eq!(buf.len(), 0);
     }
 }
