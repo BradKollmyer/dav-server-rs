@@ -45,6 +45,7 @@ mod dav_tests {
         let req = Request::builder()
             .method("PROPFIND")
             .uri("/symlink_to_dir")
+            .header("Depth", "0")
             .body(Body::empty())
             .unwrap();
 
@@ -59,6 +60,7 @@ mod dav_tests {
         let req = Request::builder()
             .method("PROPFIND")
             .uri("/")
+            .header("Depth", "1")
             .body(Body::empty())
             .unwrap();
 
@@ -105,6 +107,7 @@ mod dav_tests {
         let req = Request::builder()
             .method("PROPFIND")
             .uri("/.hidden_folder")
+            .header("Depth", "0")
             .body(Body::empty())
             .unwrap();
 
@@ -119,6 +122,7 @@ mod dav_tests {
         let req = Request::builder()
             .method("PROPFIND")
             .uri("/")
+            .header("Depth", "1")
             .body(Body::empty())
             .unwrap();
 
@@ -1254,5 +1258,124 @@ mod hide_symlinks_mutating_tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+#[cfg(feature = "memfs")]
+mod propfind_depth_tests {
+    use dav_server::{DavHandler, body::Body, fakels::FakeLs, memfs::MemFs};
+    use http::{Request, StatusCode};
+
+    fn setup() -> DavHandler {
+        DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .build_handler()
+    }
+
+    async fn resp_to_string(mut resp: http::Response<Body>) -> String {
+        use futures_util::StreamExt;
+
+        let mut data = Vec::new();
+        let body = resp.body_mut();
+
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => data.extend_from_slice(&bytes),
+                Err(e) => panic!("Error reading body stream: {}", e),
+            }
+        }
+
+        String::from_utf8(data).unwrap_or_else(|_| "".to_string())
+    }
+
+    #[tokio::test]
+    async fn propfind_missing_depth_is_forbidden_when_infinity_disabled() {
+        let server = setup();
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = resp_to_string(resp).await;
+        assert!(
+            body.contains("propfind-finite-depth"),
+            "expected propfind-finite-depth in {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn propfind_explicit_infinity_is_forbidden_when_infinity_disabled() {
+        let server = setup();
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/")
+            .header("Depth", "infinity")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_ne!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = resp_to_string(resp).await;
+        assert!(
+            body.contains("propfind-finite-depth"),
+            "expected propfind-finite-depth in {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn propfind_missing_depth_includes_collection_when_infinity_allowed() {
+        let server = DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .allow_infinity_depth(true)
+            .build_handler();
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/child.txt")
+                    .body(Body::from("hi"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body = resp_to_string(resp).await;
+        assert!(
+            body.contains("<D:href>/</D:href>"),
+            "expected request-URI collection href in {body}"
+        );
+        assert!(
+            body.contains("/child.txt"),
+            "expected child in infinite listing: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn propfind_depth_zero_includes_collection() {
+        let server = setup();
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/")
+            .header("Depth", "0")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body = resp_to_string(resp).await;
+        assert!(
+            body.contains("<D:href>/</D:href>"),
+            "expected collection href in {body}"
+        );
     }
 }

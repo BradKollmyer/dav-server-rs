@@ -275,19 +275,20 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             .typed_insert(headers::CacheControl::new().with_no_cache());
         res.headers_mut().typed_insert(headers::Pragma::no_cache());
 
+        // RFC 4918 9.1: omitted Depth is infinity.
         let depth = match req.headers().typed_get::<davheaders::Depth>() {
-            Some(davheaders::Depth::Infinity) => {
+            Some(davheaders::Depth::Zero) => davheaders::Depth::Zero,
+            Some(davheaders::Depth::One) => davheaders::Depth::One,
+            Some(davheaders::Depth::Infinity) | None => {
                 if !self.allow_infinity_depth {
                     let ct = "application/xml; charset=utf-8".to_string();
                     res.headers_mut().typed_insert(davheaders::ContentType(ct));
-                    *res.status_mut() = StatusCode::NOT_IMPLEMENTED;
+                    *res.status_mut() = StatusCode::FORBIDDEN;
                     *res.body_mut() = dav_xml_error("<D:propfind-finite-depth/>");
                     return Ok(res);
                 }
                 davheaders::Depth::Infinity
             }
-            Some(d) => d,
-            None => davheaders::Depth::Default,
         };
 
         // path and meta
@@ -350,17 +351,10 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             pw.set_tx(tx);
             let is_dir = meta.is_dir();
 
-            // Handle Depth::Default case: no target resource, only Depth 1 children
-            if depth != davheaders::Depth::Default {
-                pw.write_props(&path, meta).await?;
-                pw.flush().await?;
-            }
+            pw.write_props(&path, meta).await?;
+            pw.flush().await?;
 
-            if is_dir
-                && (depth == davheaders::Depth::One
-                    || depth == davheaders::Depth::Default
-                    || depth == davheaders::Depth::Infinity)
-            {
+            if is_dir && depth != davheaders::Depth::Zero {
                 self.propfind_directory(&path, depth, &mut pw).await?;
             }
             pw.close().await?;
@@ -424,8 +418,6 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                 }
                 propwriter.write_props(&npath, meta).await?;
                 propwriter.flush().await?;
-                // For Depth::Default, treat it like Depth::One (no recursion)
-                // Only recurse for Depth::Infinity
                 if depth == davheaders::Depth::Infinity && is_dir {
                     self.propfind_directory(&npath, depth, propwriter).await?;
                 }
