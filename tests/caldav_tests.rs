@@ -228,6 +228,58 @@ END:VCALENDAR"
     }
 
     #[tokio::test]
+    async fn test_calendar_query_report_hrefs_include_strip_prefix() {
+        let server = DavHandler::builder()
+            .filesystem(dav_server::memfs::MemFs::new())
+            .locksystem(FakeLs::new())
+            .strip_prefix("/dav")
+            .build_handler();
+
+        let req = Request::builder()
+            .method("MKCALENDAR")
+            .uri("/dav/calendars/my-calendar")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let ics_data = create_ics_data("test-event-1", "Test Event");
+        let resp = put_ics_data(&server, ics_data, "/dav/calendars/my-calendar/event.ics").await;
+        assert!(resp.status().is_success());
+
+        let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT"/>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>"#;
+
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/dav/calendars/my-calendar")
+            .header("Depth", "1")
+            .body(Body::from(report_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("/dav/calendars/my-calendar/event.ics"),
+            "REPORT href missing mount prefix: {body_str}"
+        );
+        assert!(
+            body_str.contains("Test Event"),
+            "calendar-data missing event: {body_str}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_calendar_query_filters_by_component_type() {
         let server = setup_caldav_server2().await;
         put_ics_data(

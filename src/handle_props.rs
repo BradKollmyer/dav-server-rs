@@ -1357,7 +1357,7 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
     ) -> DavResult<()> {
         self.emitter.write(XmlWEvent::start_element("D:response"))?;
 
-        let p = href.as_url_string();
+        let p = href.with_prefix().as_url_string();
         Element::new2("D:href")
             .text(p)
             .write_ev(&mut self.emitter)?;
@@ -1416,7 +1416,7 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
     ) -> DavResult<()> {
         self.emitter.write(XmlWEvent::start_element("D:response"))?;
 
-        let p = href.as_url_string();
+        let p = href.with_prefix().as_url_string();
         Element::new2("D:href")
             .text(p)
             .write_ev(&mut self.emitter)?;
