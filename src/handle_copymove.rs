@@ -174,6 +174,8 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         // for MOVE, tread with care- if the path ends in "/" but it actually
         // is a symlink, we want to move the symlink, not what it points to.
         let mut path = self.path(req);
+        self.ensure_visible(&path).await?;
+        self.ensure_visible(&dest).await?;
         let meta = if method == DavMethod::Move {
             let meta = self.fs.symlink_metadata(&path, &self.credentials).await?;
             if meta.is_symlink() {

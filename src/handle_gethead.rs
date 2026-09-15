@@ -38,8 +38,8 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         }
     }
 
-    /// Returns the metadata depending on hide_symlinks & hide_dot_prefix
-    pub(crate) async fn visible_metadata(&self, path: &DavPath) -> DavResult<Box<dyn DavMetaData>> {
+    /// 404 hidden names and hidden symlinks. Missing paths are allowed so PUT/MKCOL can create.
+    pub(crate) async fn ensure_visible(&self, path: &DavPath) -> DavResult<()> {
         if (self.hide_dot_prefix == DavOptionHide::Always
             || self.hide_dot_prefix == DavOptionHide::ForDirectPaths)
             && path.file_name_bytes().starts_with(b".")
@@ -48,10 +48,24 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         }
 
         if self.hide_symlinks {
-            let meta = self.fs.symlink_metadata(path, &self.credentials).await?;
-            if meta.is_symlink() {
-                return Err(DavError::Status(StatusCode::NOT_FOUND));
+            match self.fs.symlink_metadata(path, &self.credentials).await {
+                Ok(meta) if meta.is_symlink() => {
+                    return Err(DavError::Status(StatusCode::NOT_FOUND));
+                }
+                Ok(_) => {}
+                Err(FsError::NotFound) => {}
+                Err(e) => return Err(e.into()),
             }
+        }
+        Ok(())
+    }
+
+    /// Returns the metadata depending on hide_symlinks & hide_dot_prefix
+    pub(crate) async fn visible_metadata(&self, path: &DavPath) -> DavResult<Box<dyn DavMetaData>> {
+        self.ensure_visible(path).await?;
+
+        if self.hide_symlinks {
+            let meta = self.fs.symlink_metadata(path, &self.credentials).await?;
             Ok(meta)
         } else {
             match self.fs.metadata(path, &self.credentials).await {

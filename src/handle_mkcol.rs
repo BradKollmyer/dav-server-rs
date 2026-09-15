@@ -10,6 +10,7 @@ use crate::{DavError, DavInner, DavResult};
 impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     pub(crate) async fn handle_mkcol(&self, req: &Request<()>) -> DavResult<Response<Body>> {
         let mut path = self.path(req);
+        self.ensure_visible(&path).await?;
         let (oc_mtime, oc_ctime) = Self::oc_timestamps(req, false)?;
         let meta = self.fs.metadata(&path, &self.credentials).await;
 

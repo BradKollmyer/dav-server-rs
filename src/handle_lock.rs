@@ -33,6 +33,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         // path and meta
         let mut path = self.path(req);
+        self.ensure_visible(&path).await?;
         let meta = match self.fs.metadata(&path, &self.credentials).await {
             Ok(meta) => Some(self.fixpath(&mut res, &mut path, meta)),
             Err(_) => None,
@@ -226,6 +227,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         let mut res = Response::new(Body::empty());
 
         let mut path = self.path(req);
+        self.ensure_visible(&path).await?;
         if let Ok(meta) = self.fs.metadata(&path, &self.credentials).await {
             self.fixpath(&mut res, &mut path, meta);
         }

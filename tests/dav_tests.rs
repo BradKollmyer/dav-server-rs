@@ -984,3 +984,136 @@ mod localfs_symlink_jail_tests {
         let _ = std::fs::remove_dir_all(&outside);
     }
 }
+
+#[cfg(feature = "memfs")]
+mod hide_dot_mutating_tests {
+    use dav_server::{DavHandler, DavOptionHide, body::Body, memfs::MemFs};
+    use http::{Request, StatusCode};
+
+    fn setup() -> DavHandler {
+        DavHandler::builder()
+            .filesystem(MemFs::new())
+            .hide_dot_prefix(DavOptionHide::Always)
+            .build_handler()
+    }
+
+    #[tokio::test]
+    async fn hide_dot_always_rejects_get_and_put() {
+        let server = setup();
+
+        let get = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/.secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(get.status(), StatusCode::NOT_FOUND);
+
+        let put = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/.secret")
+                    .body(Body::from("hidden"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(put.status(), StatusCode::NOT_FOUND);
+
+        let visible = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/visible.txt")
+                    .body(Body::from("ok"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(visible.status(), StatusCode::CREATED);
+    }
+}
+
+#[cfg(all(unix, feature = "localfs"))]
+mod hide_symlinks_mutating_tests {
+    use dav_server::{DavHandler, body::Body, localfs::LocalFs};
+    use http::{Request, StatusCode};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn setup() -> (DavHandler, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "dav-hide-symlink-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("target.txt"), "hello").unwrap();
+        std::os::unix::fs::symlink("target.txt", dir.join("link.txt")).unwrap();
+
+        let server = DavHandler::builder()
+            .filesystem(LocalFs::new(&dir, true, false, false))
+            .hide_symlinks(true)
+            .build_handler();
+        (server, dir)
+    }
+
+    #[tokio::test]
+    async fn hide_symlinks_rejects_put_delete_copy_through_symlink() {
+        let (server, dir) = setup();
+
+        let put = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/link.txt")
+                    .body(Body::from("pwned"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(put.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("target.txt")).unwrap(),
+            "hello"
+        );
+
+        let delete = server
+            .handle(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/link.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(delete.status(), StatusCode::NOT_FOUND);
+        assert!(dir.join("link.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("target.txt")).unwrap(),
+            "hello"
+        );
+
+        let copy = server
+            .handle(
+                Request::builder()
+                    .method("COPY")
+                    .uri("/link.txt")
+                    .header("Destination", "/copied.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(copy.status(), StatusCode::NOT_FOUND);
+        assert!(!dir.join("copied.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("target.txt")).unwrap(),
+            "hello"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

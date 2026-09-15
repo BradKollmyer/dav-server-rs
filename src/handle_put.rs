@@ -102,6 +102,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         let (oc_mtime, oc_ctime) = Self::oc_timestamps(req, true)?;
 
         let path = self.path(req);
+        self.ensure_visible(&path).await?;
         let meta = self.fs.metadata(&path, &self.credentials).await;
 
         // close connection on error.

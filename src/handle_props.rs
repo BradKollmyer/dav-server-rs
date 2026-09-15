@@ -563,6 +563,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         // file must exist.
         let mut path = self.path(req);
+        self.ensure_visible(&path).await?;
         let meta = self.fs.metadata(&path, &self.credentials).await?;
         let meta = self.fixpath(&mut res, &mut path, meta);
 

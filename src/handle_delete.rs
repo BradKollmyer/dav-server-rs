@@ -127,6 +127,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         };
 
         let mut path = self.path(req);
+        self.ensure_visible(&path).await?;
         let meta = self.fs.symlink_metadata(&path, &self.credentials).await?;
         if meta.is_symlink()
             && let Ok(m2) = self.fs.metadata(&path, &self.credentials).await
