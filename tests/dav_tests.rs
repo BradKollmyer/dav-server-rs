@@ -818,3 +818,167 @@ mod empty_xml_body_tests {
         }
     }
 }
+
+#[cfg(all(unix, feature = "localfs"))]
+mod localfs_symlink_jail_tests {
+    use dav_server::davpath::DavPath;
+    use dav_server::fs::{DavFileSystem, FsError, OpenOptions};
+    use dav_server::{DavHandler, body::Body, localfs::LocalFs};
+    use http::{Request, StatusCode};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tempdir(prefix: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dav-{prefix}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn read_opts() -> OpenOptions {
+        OpenOptions {
+            read: true,
+            ..OpenOptions::default()
+        }
+    }
+
+    fn write_opts() -> OpenOptions {
+        OpenOptions {
+            write: true,
+            create: true,
+            truncate: true,
+            ..OpenOptions::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn localfs_open_copy_do_not_follow_symlink_out_of_share() {
+        let dir = tempdir("jail");
+        let outside = tempdir("outside");
+        let secret = outside.join("secret");
+        std::fs::write(&secret, "leaked").unwrap();
+        std::os::unix::fs::symlink(&secret, dir.join("link")).unwrap();
+        std::fs::write(dir.join("src.txt"), "payload").unwrap();
+
+        let fs = LocalFs::new(&dir, true, false, false);
+        let link = DavPath::new("/link").unwrap();
+        let src = DavPath::new("/src.txt").unwrap();
+
+        let meta = fs.metadata(&link).await;
+        assert!(
+            matches!(meta, Err(FsError::Forbidden) | Err(FsError::NotFound)),
+            "{meta:?}"
+        );
+
+        let open_read = fs.open(&link, read_opts()).await;
+        assert!(
+            matches!(open_read, Err(FsError::Forbidden) | Err(FsError::NotFound)),
+            "{open_read:?}"
+        );
+
+        let open_write = fs.open(&link, write_opts()).await;
+        assert!(open_write.is_err(), "{open_write:?}");
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "leaked");
+
+        let copy = fs.copy(&src, &link).await;
+        assert!(copy.is_err(), "{copy:?}");
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "leaked");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[tokio::test]
+    async fn localfs_follows_in_share_symlink_on_read_not_write() {
+        let dir = tempdir("jail-in");
+        std::fs::write(dir.join("inside.txt"), "ok").unwrap();
+        std::os::unix::fs::symlink("inside.txt", dir.join("rel_link")).unwrap();
+
+        let fs = LocalFs::new(&dir, true, false, false);
+        let link = DavPath::new("/rel_link").unwrap();
+
+        let mut file = fs
+            .open(&link, read_opts())
+            .await
+            .expect("read in-share symlink");
+        let bytes = file.read_bytes(16).await.unwrap();
+        assert_eq!(&bytes[..], b"ok");
+
+        let put = fs.open(&link, write_opts()).await;
+        assert!(put.is_err(), "{put:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("inside.txt")).unwrap(),
+            "ok"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn handler_get_put_copy_through_outside_symlink() {
+        let dir = tempdir("jail-http");
+        let outside = tempdir("outside-http");
+        let secret = outside.join("secret");
+        std::fs::write(&secret, "leaked").unwrap();
+        std::os::unix::fs::symlink(&secret, dir.join("link")).unwrap();
+        std::fs::write(dir.join("src.txt"), "payload").unwrap();
+
+        let server = DavHandler::builder()
+            .filesystem(LocalFs::new(&dir, true, false, false))
+            .build_handler();
+
+        let get = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/link")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert!(
+            get.status() == StatusCode::FORBIDDEN || get.status() == StatusCode::NOT_FOUND,
+            "{}",
+            get.status()
+        );
+
+        let put = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/link")
+                    .body(Body::from("overwrite"))
+                    .unwrap(),
+            )
+            .await;
+        assert!(
+            !put.status().is_success(),
+            "PUT through outside symlink: {}",
+            put.status()
+        );
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "leaked");
+
+        let copy = server
+            .handle(
+                Request::builder()
+                    .method("COPY")
+                    .uri("/src.txt")
+                    .header("Destination", "/link")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        // Overwrite may delete the symlink first, then copy into the share.
+        // Either way the outside target must not be written.
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "leaked");
+        let _ = copy;
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+}

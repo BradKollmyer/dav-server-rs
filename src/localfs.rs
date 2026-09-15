@@ -26,7 +26,7 @@ use std::os::windows::prelude::*;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::pin::pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -71,6 +71,7 @@ pub struct LocalFs {
 // inner struct.
 pub(crate) struct LocalFsInner {
     pub basedir: PathBuf,
+    pub canonical_basedir: OnceLock<PathBuf>,
     #[allow(dead_code)]
     pub public: bool,
     pub case_insensitive: bool,
@@ -126,13 +127,38 @@ fn open_for_times(path: &Path) -> io::Result<std::fs::File> {
                     .open(path)
             })
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .or_else(|_| {
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(path)
+            })
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         std::fs::OpenOptions::new()
             .write(true)
             .open(path)
             .or_else(|_| std::fs::File::open(path))
     }
+}
+
+fn init_canonical_basedir(basedir: &Path) -> OnceLock<PathBuf> {
+    let lock = OnceLock::new();
+    if let Ok(canonical) = std::fs::canonicalize(basedir) {
+        let _ = lock.set(canonical);
+    }
+    lock
+}
+
+fn path_is_within(base: &Path, path: &Path) -> bool {
+    path.strip_prefix(base).is_ok()
 }
 
 // Items from the readdir stream.
@@ -198,6 +224,7 @@ impl LocalFs {
         helper_create_directory(&basedir, crate::carddav::DEFAULT_CARDDAV_NAME);
 
         let inner = LocalFsInner {
+            canonical_basedir: init_canonical_basedir(&basedir),
             basedir,
             public,
             macos,
@@ -217,8 +244,10 @@ impl LocalFs {
     /// This is like `new()`, but it always serves this single file.
     /// The request path is ignored.
     pub fn new_file<P: AsRef<Path>>(file: P, public: bool) -> Box<LocalFs> {
+        let basedir = file.as_ref().to_path_buf();
         let inner = LocalFsInner {
-            basedir: file.as_ref().to_path_buf(),
+            canonical_basedir: init_canonical_basedir(&basedir),
+            basedir,
             public,
             macos: false,
             case_insensitive: false,
@@ -250,6 +279,7 @@ impl LocalFs {
         helper_create_directory(&basedir, crate::carddav::DEFAULT_CARDDAV_NAME);
 
         let inner = LocalFsInner {
+            canonical_basedir: init_canonical_basedir(&basedir),
             basedir,
             public,
             macos,
@@ -283,6 +313,53 @@ impl LocalFs {
         }
     }
 
+    fn canonical_basedir(&self) -> &Path {
+        self.inner.canonical_basedir.get_or_init(|| {
+            std::fs::canonicalize(&self.inner.basedir)
+                .unwrap_or_else(|_| self.inner.basedir.clone())
+        })
+    }
+
+    fn require_within(&self, resolved: &Path) -> FsResult<()> {
+        if path_is_within(self.canonical_basedir(), resolved) {
+            Ok(())
+        } else {
+            Err(FsError::Forbidden)
+        }
+    }
+
+    /// Follow symlinks, then require the resolved path to stay under basedir.
+    fn confine_follow(&self, path: &Path) -> FsResult<PathBuf> {
+        let resolved = std::fs::canonicalize(path).map_err(FsError::from)?;
+        self.require_within(&resolved)?;
+        Ok(resolved)
+    }
+
+    /// Do not follow the final component. Parent must resolve inside basedir.
+    fn confine_leaf(&self, path: &Path) -> FsResult<PathBuf> {
+        if self.inner.is_file || path == self.inner.basedir.as_path() {
+            let resolved = std::fs::canonicalize(&self.inner.basedir).map_err(FsError::from)?;
+            self.require_within(&resolved)?;
+            return Ok(resolved);
+        }
+        let filename = path.file_name().ok_or(FsError::Forbidden)?;
+        let parent = path.parent().ok_or(FsError::Forbidden)?;
+        let parent_canon = std::fs::canonicalize(parent).map_err(FsError::from)?;
+        self.require_within(&parent_canon)?;
+        let mut out = parent_canon;
+        push_normal_component(&mut out, filename)?;
+        Ok(out)
+    }
+
+    fn reject_symlink(path: &Path) -> FsResult<()> {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => Err(FsError::Forbidden),
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     // threadpool::blocking() adapter, also runs the before/after hooks.
     #[doc(hidden)]
     pub async fn blocking<F, R>(&self, func: F) -> R
@@ -311,9 +388,13 @@ impl DavFileSystem for LocalFs {
             if self.is_notfound(&path) {
                 return Err(FsError::NotFound);
             }
-            self.blocking(move || match std::fs::metadata(path) {
-                Ok(meta) => Ok(Box::new(LocalFsMetaData(meta)) as Box<dyn DavMetaData>),
-                Err(e) => Err(e.into()),
+            let this = self.clone();
+            self.blocking(move || {
+                let path = this.confine_follow(&path)?;
+                match std::fs::metadata(path) {
+                    Ok(meta) => Ok(Box::new(LocalFsMetaData(meta)) as Box<dyn DavMetaData>),
+                    Err(e) => Err(e.into()),
+                }
             })
             .await
         }
@@ -329,9 +410,13 @@ impl DavFileSystem for LocalFs {
             if self.is_notfound(&path) {
                 return Err(FsError::NotFound);
             }
-            self.blocking(move || match std::fs::symlink_metadata(path) {
-                Ok(meta) => Ok(Box::new(LocalFsMetaData(meta)) as Box<dyn DavMetaData>),
-                Err(e) => Err(e.into()),
+            let this = self.clone();
+            self.blocking(move || {
+                let path = this.confine_leaf(&path)?;
+                match std::fs::symlink_metadata(path) {
+                    Ok(meta) => Ok(Box::new(LocalFsMetaData(meta)) as Box<dyn DavMetaData>),
+                    Err(e) => Err(e.into()),
+                }
             })
             .await
         }
@@ -348,22 +433,23 @@ impl DavFileSystem for LocalFs {
         async move {
             trace!("FS: read_dir {:?}", self.fspath_dbg(davpath));
             let path = self.fspath(davpath)?;
-            let path2 = path.clone();
-            let iter = self.blocking(move || std::fs::read_dir(&path)).await;
-            match iter {
-                Ok(iterator) => {
-                    let strm = LocalFsReadDir {
-                        fs: self.clone(),
-                        do_meta: meta,
-                        buffer: VecDeque::new(),
-                        dir_cache: self.dir_cache_builder(path2),
-                        iterator: Some(iterator),
-                        fut: None,
-                    };
-                    Ok(Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>)
-                }
-                Err(e) => Err(e.into()),
-            }
+            let this = self.clone();
+            let (iter, path2) = self
+                .blocking(move || -> FsResult<_> {
+                    let path = this.confine_follow(&path)?;
+                    let iterator = std::fs::read_dir(&path)?;
+                    Ok((iterator, path))
+                })
+                .await?;
+            let strm = LocalFsReadDir {
+                fs: self.clone(),
+                do_meta: meta,
+                buffer: VecDeque::new(),
+                dir_cache: self.dir_cache_builder(path2),
+                iterator: Some(iter),
+                fut: None,
+            };
+            Ok(Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>)
         }
         .boxed()
     }
@@ -381,17 +467,35 @@ impl DavFileSystem for LocalFs {
             #[cfg(unix)]
             let mode = if self.inner.public { 0o666 } else { 0o600 };
             let path = self.fspath(path)?;
+            let mutating = options.write
+                || options.append
+                || options.truncate
+                || options.create
+                || options.create_new;
+            let this = self.clone();
             self.blocking(move || {
+                let path = if mutating {
+                    let path = this.confine_leaf(&path)?;
+                    LocalFs::reject_symlink(&path)?;
+                    path
+                } else {
+                    this.confine_follow(&path)?
+                };
                 #[cfg(unix)]
-                let res = std::fs::OpenOptions::new()
-                    .read(options.read)
-                    .write(options.write)
-                    .append(options.append)
-                    .truncate(options.truncate)
-                    .create(options.create)
-                    .create_new(options.create_new)
-                    .mode(mode)
-                    .open(path);
+                let res = {
+                    let mut opts = std::fs::OpenOptions::new();
+                    opts.read(options.read)
+                        .write(options.write)
+                        .append(options.append)
+                        .truncate(options.truncate)
+                        .create(options.create)
+                        .create_new(options.create_new)
+                        .mode(mode);
+                    if mutating {
+                        opts.custom_flags(libc::O_NOFOLLOW);
+                    }
+                    opts.open(path)
+                };
                 #[cfg(windows)]
                 let res = std::fs::OpenOptions::new()
                     .read(options.read)
@@ -423,7 +527,10 @@ impl DavFileSystem for LocalFs {
             #[cfg(unix)]
             let mode = if self.inner.public { 0o777 } else { 0o700 };
             let path = self.fspath(path)?;
+            let this = self.clone();
             self.blocking(move || {
+                let path = this.confine_leaf(&path)?;
+                LocalFs::reject_symlink(&path)?;
                 #[cfg(unix)]
                 {
                     std::fs::DirBuilder::new()
@@ -447,8 +554,12 @@ impl DavFileSystem for LocalFs {
         async move {
             trace!("FS: remove_dir {:?}", self.fspath_dbg(path));
             let path = self.fspath(path)?;
-            self.blocking(move || std::fs::remove_dir(path).map_err(|e| e.into()))
-                .await
+            let this = self.clone();
+            self.blocking(move || {
+                let path = this.confine_leaf(&path)?;
+                std::fs::remove_dir(path).map_err(|e| e.into())
+            })
+            .await
         }
         .boxed()
     }
@@ -460,8 +571,12 @@ impl DavFileSystem for LocalFs {
                 return Err(FsError::Forbidden);
             }
             let path = self.fspath(path)?;
-            self.blocking(move || std::fs::remove_file(path).map_err(|e| e.into()))
-                .await
+            let this = self.clone();
+            self.blocking(move || {
+                let path = this.confine_leaf(&path)?;
+                std::fs::remove_file(path).map_err(|e| e.into())
+            })
+            .await
         }
         .boxed()
     }
@@ -478,7 +593,10 @@ impl DavFileSystem for LocalFs {
             }
             let frompath = self.fspath(from)?;
             let topath = self.fspath(to)?;
+            let this = self.clone();
             self.blocking(move || {
+                let frompath = this.confine_leaf(&frompath)?;
+                let topath = this.confine_leaf(&topath)?;
                 match std::fs::rename(&frompath, &topath) {
                     Ok(v) => Ok(v),
                     Err(e) => {
@@ -512,9 +630,15 @@ impl DavFileSystem for LocalFs {
             }
             let path_from = self.fspath(from)?;
             let path_to = self.fspath(to)?;
+            let this = self.clone();
 
             match self
-                .blocking(move || reflink_or_copy(path_from, path_to))
+                .blocking(move || {
+                    let path_from = this.confine_follow(&path_from)?;
+                    let path_to = this.confine_leaf(&path_to)?;
+                    LocalFs::reject_symlink(&path_to)?;
+                    reflink_or_copy(path_from, path_to).map_err(FsError::from)
+                })
                 .await
             {
                 Ok(_) => Ok(()),
@@ -525,7 +649,7 @@ impl DavFileSystem for LocalFs {
                         self.fspath_dbg(to),
                         e
                     );
-                    Err(e.into())
+                    Err(e)
                 }
             }
         }
@@ -539,7 +663,10 @@ impl DavFileSystem for LocalFs {
                 return Err(FsError::Forbidden);
             }
             let path = self.fspath(davpath)?;
+            let this = self.clone();
             self.blocking(move || {
+                let path = this.confine_leaf(&path)?;
+                LocalFs::reject_symlink(&path)?;
                 open_for_times(&path)?
                     .set_modified(tm)
                     .map_err(FsError::from)
@@ -563,7 +690,10 @@ impl DavFileSystem for LocalFs {
                     return Err(FsError::Forbidden);
                 }
                 let path = self.fspath(davpath)?;
+                let this = self.clone();
                 self.blocking(move || {
+                    let path = this.confine_leaf(&path)?;
+                    LocalFs::reject_symlink(&path)?;
                     let file = open_for_times(&path)?;
                     let times = std::fs::FileTimes::new().set_created(tm);
                     file.set_times(times).map_err(FsError::from)
