@@ -350,7 +350,7 @@ where
             ls,
             allow,
             principal,
-            hide_symlinks: hide_symlinks.unwrap_or(false),
+            hide_symlinks: hide_symlinks.unwrap_or(true),
             allow_infinity_depth: allow_infinity_depth.unwrap_or(false),
             hide_dot_prefix: hide_dot_prefix.unwrap_or(DavOptionHide::InAutoIndexListings),
             autoindex,

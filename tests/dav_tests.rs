@@ -930,6 +930,8 @@ mod localfs_symlink_jail_tests {
 
         let server = DavHandler::builder()
             .filesystem(LocalFs::new(&dir, true, false, false))
+            // Follow the link so this tests LocalFs confinement, not hide_symlinks.
+            .hide_symlinks(false)
             .build_handler();
 
         let get = server
