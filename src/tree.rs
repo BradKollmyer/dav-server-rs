@@ -16,6 +16,9 @@ pub struct Tree<K: Eq + Hash, D> {
 /// id of the root node of the tree.
 pub const ROOT_ID: u64 = 1;
 
+// Root has no parent; 0 is never allocated as a node id (ids start at ROOT_ID).
+const NO_PARENT: u64 = 0;
+
 #[derive(Debug)]
 /// Node itself. "data" contains user-modifiable data.
 pub struct Node<K: Eq + Hash, D> {
@@ -37,7 +40,7 @@ impl<K: Eq + Hash + Debug + Clone, D: Debug> Tree<K, D> {
             nodes: HashMap::new(),
             node_id: ROOT_ID,
         };
-        t.new_node(99999999, data);
+        t.new_node(NO_PARENT, data);
         t
     }
 
@@ -123,9 +126,16 @@ impl<K: Eq + Hash + Debug + Clone, D: Debug> Tree<K, D> {
     }
 
     fn delete_node_from_parent(&mut self, id: u64) -> FsResult<()> {
+        // Root is never linked under a parent; leave it in `nodes`.
+        if id == ROOT_ID {
+            return Ok(());
+        }
         let parent_id = self.nodes.get(&id).ok_or(FsError::NotFound)?.parent_id;
+        if parent_id == NO_PARENT {
+            return Ok(());
+        }
         let key = {
-            let pnode = self.nodes.get(&parent_id).unwrap();
+            let pnode = self.nodes.get(&parent_id).ok_or(FsError::NotFound)?;
             let mut key = None;
             for (k, i) in &pnode.children {
                 if i == &id {
@@ -135,8 +145,8 @@ impl<K: Eq + Hash + Debug + Clone, D: Debug> Tree<K, D> {
             }
             key
         };
-        let key = key.unwrap();
-        let pnode = self.nodes.get_mut(&parent_id).unwrap();
+        let key = key.ok_or(FsError::NotFound)?;
+        let pnode = self.nodes.get_mut(&parent_id).ok_or(FsError::NotFound)?;
         pnode.children.remove(&key);
         Ok(())
     }
@@ -145,7 +155,7 @@ impl<K: Eq + Hash + Debug + Clone, D: Debug> Tree<K, D> {
     pub fn delete_node(&mut self, id: u64) -> FsResult<Node<K, D>> {
         {
             let n = self.nodes.get(&id).ok_or(FsError::NotFound)?;
-            if !n.children.is_empty() {
+            if id == ROOT_ID || !n.children.is_empty() {
                 return Err(FsError::Forbidden);
             }
         }
@@ -176,6 +186,9 @@ impl<K: Eq + Hash + Debug + Clone, D: Debug> Tree<K, D> {
         new_name: K,
         overwrite: bool,
     ) -> FsResult<()> {
+        if id == ROOT_ID {
+            return Err(FsError::Forbidden);
+        }
         let dest = {
             let pnode = self.nodes.get(&new_parent).ok_or(FsError::NotFound)?;
             if let Some(cid) = pnode.children.get(&new_name) {
@@ -203,5 +216,53 @@ impl<K> Iterator for Children<K> {
     type Item = (K, u64);
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree() -> Tree<&'static str, i32> {
+        Tree::new(0)
+    }
+
+    #[test]
+    fn delete_root_is_forbidden() {
+        let mut t = tree();
+        assert_eq!(t.delete_node(ROOT_ID).unwrap_err(), FsError::Forbidden);
+        assert!(t.get_node(ROOT_ID).is_ok());
+    }
+
+    #[test]
+    fn delete_node_from_parent_on_root_does_not_panic() {
+        let mut t = tree();
+        assert!(t.delete_node_from_parent(ROOT_ID).is_ok());
+        assert!(t.get_node(ROOT_ID).is_ok());
+    }
+
+    #[test]
+    fn delete_last_child_of_root_leaves_root() {
+        let mut t = tree();
+        let child = t.add_child(ROOT_ID, "lock", 1, false).unwrap();
+        t.delete_node(child).unwrap();
+        assert!(t.get_node(ROOT_ID).is_ok());
+        assert_eq!(
+            t.get_child(ROOT_ID, &"lock").unwrap_err(),
+            FsError::NotFound
+        );
+    }
+
+    #[cfg(feature = "memfs")]
+    #[test]
+    fn move_root_is_forbidden() {
+        let mut t = tree();
+        let dest = t.add_child(ROOT_ID, "dir", 1, false).unwrap();
+        assert_eq!(
+            t.move_node(ROOT_ID, dest, "elsewhere", false).unwrap_err(),
+            FsError::Forbidden
+        );
+        assert!(t.get_node(ROOT_ID).is_ok());
+        assert!(t.get_node(dest).is_ok());
     }
 }
