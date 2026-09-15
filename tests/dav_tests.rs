@@ -2528,4 +2528,34 @@ mod memfs_path_tests {
             "last-modified should change after partial write"
         );
     }
+
+    #[tokio::test]
+    async fn move_file_onto_empty_collection_fails() {
+        use bytes::Bytes;
+        use dav_server::davpath::DavPath;
+        use dav_server::fs::{DavFileSystem, FsError, OpenOptions};
+
+        let fs = MemFs::new();
+        let dir = DavPath::new("/dir").unwrap();
+        let file = DavPath::new("/file").unwrap();
+        fs.create_dir(&dir).await.unwrap();
+
+        let oo = OpenOptions {
+            write: true,
+            create: true,
+            truncate: true,
+            ..OpenOptions::default()
+        };
+        let mut f = fs.open(&file, oo).await.unwrap();
+        f.write_bytes(Bytes::from_static(b"hello")).await.unwrap();
+        drop(f);
+
+        let err = fs.rename(&file, &dir).await.unwrap_err();
+        assert_eq!(err, FsError::Exists);
+
+        let meta = fs.metadata(&dir).await.unwrap();
+        assert!(meta.is_dir(), "/dir should still be a collection");
+        let file_meta = fs.metadata(&file).await.unwrap();
+        assert!(!file_meta.is_dir());
+    }
 }

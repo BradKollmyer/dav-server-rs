@@ -244,6 +244,11 @@ impl DavFileSystem for MemFs {
             let node_id = tree.lookup(from.as_bytes())?;
             let parent_id = tree.lookup_parent(from.as_bytes())?;
             let dst_id = tree.lookup_parent(to.as_bytes())?;
+            if let Ok(existing) = tree.lookup(to.as_bytes())
+                && tree.get_node(existing)?.is_dir()
+            {
+                return Err(FsError::Exists);
+            }
             tree.move_node(node_id, dst_id, file_name(to.as_bytes()), true)?;
             tree.get_node_mut(parent_id)?
                 .update_mtime(SystemTime::now());
@@ -742,5 +747,25 @@ mod tests {
         let after_buf = DavFileSystem::metadata(&*fs, &p).await.unwrap();
         assert_ne!(after_buf.modified().unwrap(), old);
         assert_ne!(after_buf.etag(), before_etag);
+    }
+
+    #[tokio::test]
+    async fn rename_does_not_overwrite_empty_collection() {
+        let fs = MemFs::new();
+        DavFileSystem::create_dir(&*fs, &path("/dir"))
+            .await
+            .unwrap();
+        create_file(&fs, "/file", b"hello").await;
+
+        let err = DavFileSystem::rename(&*fs, &path("/file"), &path("/dir"))
+            .await
+            .unwrap_err();
+        assert_eq!(err, FsError::Exists);
+
+        let dir = DavFileSystem::metadata(&*fs, &path("/dir")).await.unwrap();
+        assert!(dir.is_dir());
+        let file = DavFileSystem::metadata(&*fs, &path("/file")).await.unwrap();
+        assert!(!file.is_dir());
+        assert_eq!(file.len(), 5);
     }
 }
