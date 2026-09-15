@@ -209,6 +209,9 @@ impl LocalFs {
     ///
     /// If "case_insensitive" is set to true, all filesystem lookups will
     /// be case insensitive. Note that this has a _lot_ of overhead!
+    ///
+    /// Resolved paths, including those reached via symlinks, must stay under
+    /// the canonical basedir. A path that would escape the share is 403.
     pub fn new<P: AsRef<Path>>(
         base: P,
         public: bool,

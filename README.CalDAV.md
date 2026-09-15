@@ -21,7 +21,9 @@ The CalDAV implementation in dav-server includes:
 - **CalDAV Properties**: Calendar-specific WebDAV properties
 - **iCalendar Support**: Parse and validate iCalendar data
 - **Time Range Queries**: Filter events by date/time ranges
-- **Component Filtering**: Filter by calendar component types (VEVENT, VTODO, etc.)
+- **Component Filtering**: Nested `comp-filter` by calendar component types (VEVENT, VTODO, etc.)
+- **Property Filtering**: `prop-filter` with optional `text-match` on property values
+- **Unreadable members**: Unreadable or unparseable collection members are skipped, not failed
 
 ## Enabling CalDAV
 
@@ -29,7 +31,7 @@ CalDAV support is available as an optional cargo feature:
 
 ```toml
 [dependencies]
-dav-server = { version = "0.8", features = ["caldav"] }
+dav-server = { version = "0.12", features = ["caldav"] }
 ```
 
 ## Quick Start
@@ -76,7 +78,15 @@ curl -X MKCALENDAR http://localhost:8080/calendars/my-calendar/ \
 
 ### REPORT
 
-Query calendar data:
+Query calendar data. Response `href` values include the handler `strip_prefix`
+(the mount prefix). Unreadable or unparseable members are omitted from
+`calendar-query` results.
+
+`calendar-query` requires a `CALDAV:filter` with a nested `comp-filter`
+(RFC 4791 7.8.1). A REPORT without that filter is `400 Bad Request`. Nested
+`comp-filter` elements are evaluated; `prop-filter` matches the named iCalendar
+property, with optional `text-match`. `param-filter` and `prop-filter`
+`time-range` are parsed but not applied.
 
 #### Calendar Query
 
@@ -109,10 +119,14 @@ curl -X REPORT http://localhost:8080/calendars/my-calendar/ \
   <D:prop>
     <C:calendar-data/>
   </D:prop>
-  <D:href>/my-calendar/event1.ics</D:href>
-  <D:href>/my-calendar/event2.ics</D:href>
+  <D:href>/calendars/my-calendar/event1.ics</D:href>
+  <D:href>/calendars/my-calendar/event2.ics</D:href>
 </C:calendar-multiget>'
 ```
+
+`calendar-multiget` hrefs must name calendar object resources inside the
+target collection (RFC 4791 7.9). Href values outside that collection are
+reported as missing (404 in the 207), not fetched.
 
 ## CalDAV Properties
 
@@ -181,6 +195,8 @@ Current limitations include:
 - No calendar sharing or ACL support
 - Basic time zone handling
 - No recurring event expansion in queries
+- `prop-filter` `time-range` and `param-filter` are not applied
+- `calendar-multiget` hrefs outside the collection are treated as missing
 
 ## Example Applications
 These calendar server examples lacks authentication and does not support user-specific access. The default FileSystems can only create collections on the path "/calendars".  
@@ -222,7 +238,13 @@ let server = DavHandler::builder()
 Run CalDAV tests with:
 
 ```bash
-cargo test --features caldav caldav_tests
+cargo test --features caldav --test caldav_tests
+```
+
+Or the full suite, including CardDAV:
+
+```bash
+cargo test --all-features
 ```
 
 Run the CalDAV example:

@@ -1,4 +1,4 @@
-//! ## Generic async HTTP/Webdav handler with CalDAV support
+//! ## Generic async HTTP/Webdav handler with CalDAV and CardDAV support
 //!
 //! [`Webdav`] (RFC4918) is defined as
 //! HTTP (GET/HEAD/PUT/DELETE) plus a bunch of extension methods (PROPFIND, etc).
@@ -9,7 +9,8 @@
 //! [`CalDAV`] (RFC4791) extends WebDAV to provide calendar functionality,
 //! including calendar collections, calendar resources (iCalendar data),
 //! and calendar-specific queries. CalDAV support is available with the
-//! `caldav` feature.
+//! `caldav` feature. [`CardDAV`] (RFC6352) does the same for address books
+//! (`carddav` feature).
 //!
 //! A `handler` is a piece of code that takes a `http::Request`, processes it in some
 //! way, and then generates a `http::Response`. This library is a `handler` that maps
@@ -22,8 +23,9 @@
 //! files (GET/HEAD) or as a handler for the entire Webdav protocol. In the latter case, you can
 //! mount it as a remote filesystem: Linux, Windows, macOS can all mount Webdav filesystems.
 //!
-//! With CalDAV support enabled, it can also serve as a calendar server compatible
-//! with CalDAV clients like Thunderbird, Apple Calendar, and other calendar applications.
+//! With CalDAV or CardDAV enabled, it can also serve as a calendar or address-book
+//! server compatible with clients like Thunderbird, Apple Calendar, and other
+//! CalDAV/CardDAV applications.
 //!
 //! ## Backend interfaces.
 //!
@@ -49,17 +51,25 @@
 //!
 //! CalDAV support implements the core CalDAV specification from [RFC4791], including:
 //! - Calendar collections (MKCALENDAR method)
-//! - Calendar queries (REPORT method with calendar-query)
-//! - Calendar multiget (REPORT method with calendar-multiget)
+//! - Calendar queries (REPORT method with calendar-query; `CALDAV:filter` is required)
+//! - Calendar multiget (REPORT method with calendar-multiget; hrefs must be in the collection)
+//! - Nested `comp-filter` evaluation, plus `prop-filter`/`text-match` on property values
 //! - CalDAV properties (supported-calendar-component-set, etc.)
 //! - iCalendar data validation and processing
+//!
+//! CardDAV support implements the core of [RFC6352]: MKADDRESSBOOK, addressbook-query
+//! (text-match on the named property), addressbook-multiget, and vCard validation.
 //!
 //! The litmus test suite also has tests for RFC3744 "acl" and "principal",
 //! RFC5842 "bind", and RFC3253 "versioning". Those we do not support right now.
 //!
 //! The relevant parts of the HTTP RFCs are also implemented, such as the
 //! preconditions (If-Match, If-None-Match, If-Modified-Since, If-Unmodified-Since,
-//! If-Range), partial transfers (Range).
+//! If-Range), partial transfers (Range). Multipart `Range` responses use CRLF
+//! delimiters. `PUT` or `PATCH` on a collection is `405 Method Not Allowed`.
+//! Omitted PROPFIND `Depth` is infinity (403 when `allow_infinity_depth` is
+//! false). Named PROPFIND requests report missing properties as 404 propstats
+//! and do not leak unsolicited dead properties.
 //!
 //! Also implemented is `partial PUT`, for which there are currently two
 //! non-standard ways to do it: [`PUT` with the `Content-Range` header][PUT],
@@ -104,15 +114,18 @@
 //!
 //! ```toml
 //! [dependencies]
-//! dav-server = { version = "0.9", features = ["caldav"] }
+//! dav-server = { version = "0.12", features = ["caldav"] }
 //! ```
 //!
 //! This adds support for:
 //! - `MKCALENDAR` method for creating calendar collections
-//! - `REPORT` method for calendar queries
+//! - `REPORT` method for calendar queries (`calendar-query`, `calendar-multiget`)
 //! - CalDAV-specific properties and resource types
 //! - iCalendar data validation
 //! - Calendar-specific WebDAV extensions
+//!
+//! Enable `carddav` the same way for MKADDRESSBOOK, addressbook-query, and
+//! addressbook-multiget.
 //!
 //! ## Example.
 //!
@@ -180,6 +193,8 @@
 //! [RFC4918]: https://tools.ietf.org/html/rfc4918
 //! [`CalDAV`]: https://tools.ietf.org/html/rfc4791
 //! [RFC4791]: https://tools.ietf.org/html/rfc4791
+//! [`CardDAV`]: https://tools.ietf.org/html/rfc6352
+//! [RFC6352]: https://tools.ietf.org/html/rfc6352
 //! [`MemLs`]: memls/index.html
 //! [`MemFs`]: memfs/index.html
 //! [`LocalFs`]: localfs/index.html

@@ -3,6 +3,12 @@
 //! This module provides CardDAV functionality on top of the base WebDAV implementation.
 //! CardDAV is defined in RFC 6352 and provides standardized access to address book data
 //! using the vCard format.
+//!
+//! `addressbook-query` `text-match` is evaluated against the named vCard
+//! property (not every property). `addressbook-multiget` hrefs must name
+//! address-object resources inside the target collection. REPORT `href`
+//! values include the handler `strip_prefix`. Unreadable or unparseable
+//! members are skipped.
 
 #[cfg(feature = "carddav")]
 use calcard::vcard::{VCard, VCardValue};

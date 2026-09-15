@@ -6,6 +6,10 @@
 //! This means you have to create the instance once, using `MemFs::new`, store
 //! it in your handler struct, and clone() it every time you pass
 //! it to the DavHandler. As a MemFs struct is just a handle, cloning is cheap.
+//!
+//! Lookup that walks through a regular file is forbidden. `MOVE` will not
+//! replace an existing collection, even an empty one. Partial writes update
+//! mtime (and therefore ETag).
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, SeekFrom};
 use std::sync::{Arc, Mutex};

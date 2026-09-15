@@ -6,6 +6,10 @@
 //! This means you have to create the instance once, using `MemLs::new`, store
 //! it in your handler struct, and clone() it every time you pass
 //! it to the DavHandler. As a MemLs struct is just a handle, cloning is cheap.
+//!
+//! Expired locks are dropped before lock, unlock, refresh, check, and
+//! discover. `discover` returns locks that cover the path: the resource
+//! itself plus `Depth: infinity` ancestors, not `Depth: 0` ancestors.
 use std::collections::HashMap;
 use std::future;
 use std::sync::{Arc, Mutex};

@@ -17,7 +17,9 @@ If-Unmodified-Since, and If headers to the request url, but not recursively.
 
 ### Props on symbolic links
 
-Should probably disallow that
+`hide_symlinks` (default true) treats a symlink as 404 for GET, PROPFIND, and
+mutating methods. Direct access to the link itself is still not a first-class
+resource.
 
 ### In MOVE/DELETE test locks seperately per resource
 
@@ -66,7 +68,7 @@ the lock database is seperate from the webdav server.
 - API: perhaps move filesystem interface to Path/PathBuf or similar and hide WebPath
 
 - add documentation
-- add tests, tests ...
+- more tests: actix/warp shims
 
 ## Project ideas:
 
@@ -75,7 +77,6 @@ the lock database is seperate from the webdav server.
   then also store creationdate in an attribute.
 
 - Add support for changing live props like mtime/atime
-  - Win32LastModifiedTime on PROPPATCH is applied via set_modified
   - atime could be done with Win32LastAccessTime
   - allow setting apache "executable" prop
   - it appears that there are webdav implementations that allow

@@ -26,12 +26,23 @@ use crate::fs::*;
 use crate::ls::*;
 use crate::voidfs::{VoidFs, is_voidfs};
 
+/// How to hide names that start with `.` (dotfiles).
+///
+/// The default is [`InAutoIndexListings`](Self::InAutoIndexListings).
+/// [`ForDirectPaths`](Self::ForDirectPaths) and [`Always`](Self::Always) also
+/// apply to mutating methods (PUT, DELETE, COPY, MOVE, MKCOL, LOCK, UNLOCK,
+/// PROPPATCH).
 #[derive(Clone, Copy, PartialEq)]
 pub enum DavOptionHide {
+    /// Do not hide dot-prefixed names.
     Never,
+    /// Omit them from HTML directory autoindex only.
     InAutoIndexListings,
+    /// Omit them from autoindex and PROPFIND listings.
     InListings,
+    /// Treat a direct request for a dot-prefixed name as 404. Listings are unchanged.
     ForDirectPaths,
+    /// Hide from listings and treat direct requests as 404.
     Always,
 }
 
@@ -128,21 +139,28 @@ impl<C> DavConfig<C> {
         this
     }
 
-    /// Hide symbolic links (default is true)
+    /// Hide symbolic links (default is true).
+    ///
+    /// When true, a symlink is 404 for GET, PROPFIND, and mutating methods,
+    /// and directory listings do not follow it.
     pub fn hide_symlinks(self, hide: bool) -> Self {
         let mut this = self;
         this.hide_symlinks = Some(hide);
         this
     }
 
-    /// sets allow_infinity_depth (default is false)
+    /// Allow `Depth: infinity` on PROPFIND (default is false).
+    ///
+    /// RFC 4918 9.1 treats a missing Depth header as infinity, so this also
+    /// governs PROPFIND with no Depth. When false, those requests return 403
+    /// with a `propfind-finite-depth` error body.
     pub fn allow_infinity_depth(self, allow: bool) -> Self {
         let mut this = self;
         this.allow_infinity_depth = Some(allow);
         this
     }
 
-    /// sets hide_dot_prefix (default is false)
+    /// Hide names beginning with `.` (default is [`DavOptionHide::InAutoIndexListings`]).
     pub fn hide_dot_prefix(self, hide: DavOptionHide) -> Self {
         let mut this = self;
         this.hide_dot_prefix = Some(hide);

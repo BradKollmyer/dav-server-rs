@@ -121,10 +121,12 @@ pub struct ComponentFilter {
     pub comp_filters: Vec<ComponentFilter>,
 }
 
-/// CalDAV property filter with time-range support
+/// CalDAV property filter.
 ///
-/// Note: CalDAV property filters include time-range which is not present
-/// in the shared ParameterFilter. CardDAV has a similar struct without time_range.
+/// Matching uses `name`, `is_not_defined`, and optional `text-match`.
+/// `time_range` and `param_filters` are parsed from REPORT XML but are not
+/// applied when evaluating a query. CardDAV has a similar struct without
+/// `time_range`.
 #[derive(Debug, Clone)]
 pub struct PropertyFilter {
     pub name: String,

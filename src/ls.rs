@@ -77,6 +77,9 @@ pub trait DavLockSystem: Debug + Send + Sync + DynClone {
     ) -> LsFuture<'_, Result<(), DavLock>>;
 
     /// Find and return all locks that cover a given path.
+    ///
+    /// That is the lock on `path` itself, plus `Depth: infinity` ancestor
+    /// locks. A `Depth: 0` lock on an ancestor does not cover `path`.
     fn discover(&'_ self, path: &DavPath) -> LsFuture<'_, Vec<DavLock>>;
 
     /// Delete all locks at this path and below (after MOVE or DELETE)

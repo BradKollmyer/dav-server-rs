@@ -49,17 +49,35 @@ checks][README_litmus] of the Webdav Litmus Test testsuite. That's all of the ba
 
 - In most implementations "proppatch" is not needed. If you do need it then specify the "proppatch" feature, otherwise only specify the features you need. The "proppatch" feature is on by default.
 
+Optional [CalDAV][RFC4791] (`caldav` feature) and [CardDAV][RFC6352] (`carddav`
+feature) are also implemented. See [README.CalDAV.md](README.CalDAV.md) for
+CalDAV setup, queries, and limitations.
+
 The litmus test suite also has tests for RFC3744 "acl" and "principal",
 RFC5842 "bind", and RFC3253 "versioning". Those we do not support right now.
 
 The relevant parts of the HTTP RFCs are also implemented, such as the
 preconditions (If-Match, If-None-Match, If-Modified-Since, If-Unmodified-Since,
-If-Range), partial transfers (Range).
+If-Range), partial transfers (Range). Multipart `Range` responses use CRLF
+delimiters. `PUT` or `PATCH` on a collection is `405 Method Not Allowed`.
+Omitted PROPFIND `Depth` is infinity (403 when `allow_infinity_depth` is
+false). Named PROPFIND requests report missing properties as 404 propstats
+and do not leak unsolicited dead properties.
 
 Also implemented is `partial PUT`, for which there are currently two
 non-standard ways to do it: [`PUT` with the `Content-Range` header][PUT],
 which is what Apache's `mod_dav` implements, and [`PATCH` with the `X-Update-Range`
 header][PATCH] from `SabreDav`.
+
+The ownCloud/Nextcloud `X-OC-MTime` and `X-OC-CTime` request headers are
+honored on `PUT` and `MKCOL` so sync clients can preserve original
+modification and creation times. When the filesystem backend accepts a
+timestamp, the response includes `X-OC-MTime: accepted` and/or
+`X-OC-CTime: accepted`. A malformed timestamp yields `400 Bad Request`.
+
+`PROPPATCH` of Windows Explorer's `Win32LastModifiedTime` is applied via
+the same `set_modified` backend. The 207 still reports 200 for that
+property so the Windows client keeps working; a malformed value is 409.
 
 ### Backends.
 
@@ -148,6 +166,8 @@ async fn main() {
 [DavProp]: https://docs.rs/dav-server/latest/dav_server/fs/struct.DavProp.html
 [`WebDav`]: https://tools.ietf.org/html/rfc4918
 [RFC4918]: https://tools.ietf.org/html/rfc4918
+[RFC4791]: https://tools.ietf.org/html/rfc4791
+[RFC6352]: https://tools.ietf.org/html/rfc6352
 [`MemLs`]: https://docs.rs/dav-server/latest/dav_server/memls/index.html
 [`MemFs`]: https://docs.rs/dav-server/latest/dav_server/memfs/index.html
 [`LocalFs`]: https://docs.rs/dav-server/latest/dav_server/localfs/index.html
@@ -167,6 +187,14 @@ async fn main() {
 This crate uses std::future::Future and async/await, so it only works with Rust 1.39 and up.
 
 ### Testing.
+
+Protocol coverage lives in the cargo test suite:
+
+```
+cargo test --all-features
+```
+
+Litmus still exercises a live server:
 
 ```
 RUST_LOG=dav_server=debug cargo run --example sample-litmus-server
