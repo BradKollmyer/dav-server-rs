@@ -1466,6 +1466,58 @@ mod fakels_tests {
         assert_eq!(status2, StatusCode::OK);
         assert!(token2.is_some());
     }
+
+    async fn resp_to_string(mut resp: http::Response<Body>) -> String {
+        use futures_util::StreamExt;
+
+        let mut data = Vec::new();
+        let body = resp.body_mut();
+
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => data.extend_from_slice(&bytes),
+                Err(e) => panic!("Error reading body stream: {e}"),
+            }
+        }
+
+        String::from_utf8(data).unwrap_or_else(|_| "".to_string())
+    }
+
+    #[tokio::test]
+    async fn lock_then_propfind_lockdiscovery_includes_token() {
+        let server = setup();
+        assert_eq!(put(&server, "/file.txt", "v1").await, StatusCode::CREATED);
+
+        let (status, token) = lock(&server, "/file.txt").await;
+        assert_eq!(status, StatusCode::OK);
+        let token = token.expect("Lock-Token header");
+        let token_href = token.trim_matches(|c| c == '<' || c == '>');
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PROPFIND")
+                    .uri("/file.txt")
+                    .header("Depth", "0")
+                    .header("Content-Type", "application/xml")
+                    .body(Body::from(
+                        r#"<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:lockdiscovery/>
+  </D:prop>
+</D:propfind>"#,
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body = resp_to_string(resp).await;
+        assert!(
+            body.contains(token_href),
+            "lockdiscovery should include issued token {token_href}: {body}"
+        );
+    }
 }
 
 #[cfg(all(unix, feature = "localfs"))]
