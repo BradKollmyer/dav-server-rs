@@ -377,15 +377,6 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             }
         }
 
-        #[cfg(feature = "caldav")]
-        if crate::caldav::is_path_in_caldav_directory(path) {
-            return Some(crate::caldav::DEFAULT_MAX_RESOURCE_SIZE);
-        }
-        #[cfg(feature = "carddav")]
-        if crate::carddav::is_path_in_carddav_directory(path) {
-            return Some(crate::carddav::DEFAULT_MAX_RESOURCE_SIZE);
-        }
-
         None
     }
 

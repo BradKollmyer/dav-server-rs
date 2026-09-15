@@ -311,6 +311,24 @@ pub trait DavFileSystem {
     fn get_quota(&'_ self) -> FsFuture<'_, (u64, Option<u64>)> {
         notimplemented_fut!("get_quota")
     }
+
+    /// Mark a collection as a CalDAV calendar.
+    ///
+    /// The default implementation is a no-op.
+    #[cfg(feature = "caldav")]
+    #[allow(unused_variables)]
+    fn mark_calendar<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
+        Box::pin(future::ready(Ok(())))
+    }
+
+    /// Mark a collection as a CardDAV address book.
+    ///
+    /// The default implementation is a no-op.
+    #[cfg(feature = "carddav")]
+    #[allow(unused_variables)]
+    fn mark_addressbook<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
+        Box::pin(future::ready(Ok(())))
+    }
 }
 
 /// File system with access control. Type parameter `C` (credentials) represents
@@ -551,6 +569,24 @@ where
     fn get_quota<'a>(&'a self, credentials: &'a C) -> FsFuture<'a, (u64, Option<u64>)> {
         notimplemented_fut!("get_quota")
     }
+
+    /// Mark a collection as a CalDAV calendar.
+    ///
+    /// The default implementation is a no-op.
+    #[cfg(feature = "caldav")]
+    #[allow(unused_variables)]
+    fn mark_calendar<'a>(&'a self, path: &'a DavPath, credentials: &'a C) -> FsFuture<'a, ()> {
+        Box::pin(future::ready(Ok(())))
+    }
+
+    /// Mark a collection as a CardDAV address book.
+    ///
+    /// The default implementation is a no-op.
+    #[cfg(feature = "carddav")]
+    #[allow(unused_variables)]
+    fn mark_addressbook<'a>(&'a self, path: &'a DavPath, credentials: &'a C) -> FsFuture<'a, ()> {
+        Box::pin(future::ready(Ok(())))
+    }
 }
 
 clone_trait_object! {<C> GuardedFileSystem<C>}
@@ -685,6 +721,16 @@ impl<Fs: DavFileSystem + Clone + Send + Sync> GuardedFileSystem<()> for Fs {
 
     fn get_quota(&'_ self, _credentials: &()) -> FsFuture<'_, (u64, Option<u64>)> {
         DavFileSystem::get_quota(self)
+    }
+
+    #[cfg(feature = "caldav")]
+    fn mark_calendar<'a>(&'a self, path: &'a DavPath, _credentials: &()) -> FsFuture<'a, ()> {
+        DavFileSystem::mark_calendar(self, path)
+    }
+
+    #[cfg(feature = "carddav")]
+    fn mark_addressbook<'a>(&'a self, path: &'a DavPath, _credentials: &()) -> FsFuture<'a, ()> {
+        DavFileSystem::mark_addressbook(self, path)
     }
 }
 

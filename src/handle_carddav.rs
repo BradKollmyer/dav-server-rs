@@ -61,6 +61,9 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     ) -> DavResult<Response<Body>> {
         let set_props = parse_mkcol_or_mkaddressbook_set_props(body)?;
         let resp = self.handle_mkcol(req).await?;
+        self.fs
+            .mark_addressbook(&self.path(req), &self.credentials)
+            .await?;
         self.apply_mkcol_set_props(&self.path(req), set_props).await;
         Ok(resp)
     }

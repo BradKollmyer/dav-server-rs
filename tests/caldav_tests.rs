@@ -132,6 +132,86 @@ END:VCALENDAR"
     }
 
     #[tokio::test]
+    async fn test_mkcalendar_outside_calendars_prefix_is_calendar() {
+        let server = setup_caldav_server();
+
+        let req = Request::builder()
+            .method("MKCOL")
+            .uri("/other")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let req = Request::builder()
+            .method("MKCALENDAR")
+            .uri("/other/cal")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <D:resourcetype/>
+  </D:prop>
+</D:propfind>"#;
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/other/cal")
+            .header("Depth", "0")
+            .body(Body::from(propfind_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("<C:calendar"),
+            "MKCALENDAR outside /calendars must still be a calendar: {body_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mkcol_under_calendars_is_not_calendar() {
+        let server = setup_caldav_server();
+
+        let req = Request::builder()
+            .method("MKCOL")
+            .uri("/calendars/not-a-cal")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <D:resourcetype/>
+  </D:prop>
+</D:propfind>"#;
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/calendars/not-a-cal")
+            .header("Depth", "0")
+            .body(Body::from(propfind_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("collection"),
+            "MKCOL under /calendars should be a collection: {body_str}"
+        );
+        assert!(
+            !body_str.contains("<C:calendar"),
+            "MKCOL under /calendars must not be a calendar: {body_str}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_mkcalendar_already_exists() {
         // First create a regular collection
         let server = setup_caldav_server2().await;

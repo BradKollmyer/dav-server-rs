@@ -145,6 +145,8 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             Ok(()) => {}
         }
 
+        self.fs.mark_calendar(&path, &self.credentials).await?;
+
         if let Some(tree) = mkcalendar {
             #[cfg(feature = "proppatch")]
             self.apply_set_props(&path, &tree).await?;

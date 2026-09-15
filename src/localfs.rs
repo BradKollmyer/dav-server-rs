@@ -60,7 +60,38 @@ where
 }
 
 #[derive(Debug, Clone)]
-struct LocalFsMetaData(std::fs::Metadata);
+struct LocalFsMetaData {
+    meta: std::fs::Metadata,
+    #[cfg(feature = "caldav")]
+    is_calendar: bool,
+    #[cfg(feature = "carddav")]
+    is_addressbook: bool,
+}
+
+impl LocalFsMetaData {
+    #[allow(unused_variables)]
+    fn new(path: &Path, meta: std::fs::Metadata) -> Self {
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        let is_dir = meta.is_dir();
+        LocalFsMetaData {
+            #[cfg(feature = "caldav")]
+            is_calendar: is_dir && path.join(".dav-calendar").exists(),
+            #[cfg(feature = "carddav")]
+            is_addressbook: is_dir && path.join(".dav-addressbook").exists(),
+            meta,
+        }
+    }
+
+    fn from_file_meta(meta: std::fs::Metadata) -> Self {
+        LocalFsMetaData {
+            meta,
+            #[cfg(feature = "caldav")]
+            is_calendar: false,
+            #[cfg(feature = "carddav")]
+            is_addressbook: false,
+        }
+    }
+}
 
 /// Local Filesystem implementation.
 #[derive(Clone)]
@@ -376,6 +407,28 @@ impl LocalFs {
         })
         .await
     }
+
+    #[cfg(any(feature = "caldav", feature = "carddav"))]
+    fn mark_sidecar<'a>(&'a self, path: &'a DavPath, name: &'a str) -> FsFuture<'a, ()> {
+        async move {
+            let path = self.fspath(path)?;
+            let this = self.clone();
+            let name = name.to_string();
+            self.blocking(move || {
+                let path = this.confine_leaf(&path)?;
+                let mut sidecar = path;
+                push_normal_component(&mut sidecar, OsStr::new(&name))?;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .open(&sidecar)
+                    .map(|_| ())
+                    .map_err(FsError::from)
+            })
+            .await
+        }
+        .boxed()
+    }
 }
 
 // This implementation is basically a bunch of boilerplate to
@@ -393,8 +446,10 @@ impl DavFileSystem for LocalFs {
             let this = self.clone();
             self.blocking(move || {
                 let path = this.confine_follow(&path)?;
-                match std::fs::metadata(path) {
-                    Ok(meta) => Ok(Box::new(LocalFsMetaData(meta)) as Box<dyn DavMetaData>),
+                match std::fs::metadata(&path) {
+                    Ok(meta) => {
+                        Ok(Box::new(LocalFsMetaData::new(&path, meta)) as Box<dyn DavMetaData>)
+                    }
                     Err(e) => Err(e.into()),
                 }
             })
@@ -415,8 +470,10 @@ impl DavFileSystem for LocalFs {
             let this = self.clone();
             self.blocking(move || {
                 let path = this.confine_leaf(&path)?;
-                match std::fs::symlink_metadata(path) {
-                    Ok(meta) => Ok(Box::new(LocalFsMetaData(meta)) as Box<dyn DavMetaData>),
+                match std::fs::symlink_metadata(&path) {
+                    Ok(meta) => {
+                        Ok(Box::new(LocalFsMetaData::new(&path, meta)) as Box<dyn DavMetaData>)
+                    }
                     Err(e) => Err(e.into()),
                 }
             })
@@ -550,6 +607,16 @@ impl DavFileSystem for LocalFs {
             .await
         }
         .boxed()
+    }
+
+    #[cfg(feature = "caldav")]
+    fn mark_calendar<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
+        self.mark_sidecar(path, ".dav-calendar")
+    }
+
+    #[cfg(feature = "carddav")]
+    fn mark_addressbook<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
+        self.mark_sidecar(path, ".dav-addressbook")
     }
 
     fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
@@ -870,8 +937,10 @@ impl DavDirEntry for LocalFsDirEntry {
     fn metadata(&'_ self) -> FsFuture<'_, Box<dyn DavMetaData>> {
         match self.meta {
             Meta::Data(ref meta) => {
+                let fullpath = self.entry.path();
                 let m = match meta {
-                    Ok(meta) => Ok(Box::new(LocalFsMetaData(meta.clone())) as Box<dyn DavMetaData>),
+                    Ok(meta) => Ok(Box::new(LocalFsMetaData::new(&fullpath, meta.clone()))
+                        as Box<dyn DavMetaData>),
                     Err(e) => Err(e.into()),
                 };
                 Box::pin(future::ready(m))
@@ -879,7 +948,9 @@ impl DavDirEntry for LocalFsDirEntry {
             Meta::Fs(ref fs) => {
                 let fullpath = self.entry.path();
                 fs.blocking(move || match std::fs::symlink_metadata(&fullpath) {
-                    Ok(meta) => Ok(Box::new(LocalFsMetaData(meta)) as Box<dyn DavMetaData>),
+                    Ok(meta) => {
+                        Ok(Box::new(LocalFsMetaData::new(&fullpath, meta)) as Box<dyn DavMetaData>)
+                    }
                     Err(e) => Err(e.into()),
                 })
                 .boxed()
@@ -938,7 +1009,7 @@ impl DavFile for LocalFsFile {
             let file = self.file.take().unwrap();
             let (meta, file) = blocking(move || (file.metadata(), file)).await;
             self.file = Some(file);
-            Ok(Box::new(LocalFsMetaData(meta?)) as Box<dyn DavMetaData>)
+            Ok(Box::new(LocalFsMetaData::from_file_meta(meta?)) as Box<dyn DavMetaData>)
         }
         .boxed()
     }
@@ -1024,50 +1095,50 @@ fn filetime_to_systemtime(ticks: u64) -> SystemTime {
 
 impl DavMetaData for LocalFsMetaData {
     fn len(&self) -> u64 {
-        self.0.len()
+        self.meta.len()
     }
     fn created(&self) -> FsResult<SystemTime> {
-        self.0.created().map_err(|e| e.into())
+        self.meta.created().map_err(|e| e.into())
     }
     fn modified(&self) -> FsResult<SystemTime> {
-        self.0.modified().map_err(|e| e.into())
+        self.meta.modified().map_err(|e| e.into())
     }
     fn accessed(&self) -> FsResult<SystemTime> {
-        self.0.accessed().map_err(|e| e.into())
+        self.meta.accessed().map_err(|e| e.into())
     }
 
     #[cfg(unix)]
     fn status_changed(&self) -> FsResult<SystemTime> {
-        Ok(UNIX_EPOCH + Duration::new(self.0.ctime() as u64, 0))
+        Ok(UNIX_EPOCH + Duration::new(self.meta.ctime() as u64, 0))
     }
 
     #[cfg(windows)]
     fn status_changed(&self) -> FsResult<SystemTime> {
-        Ok(filetime_to_systemtime(self.0.creation_time()))
+        Ok(filetime_to_systemtime(self.meta.creation_time()))
     }
 
     fn is_dir(&self) -> bool {
-        self.0.is_dir()
+        self.meta.is_dir()
     }
     fn is_file(&self) -> bool {
-        self.0.is_file()
+        self.meta.is_file()
     }
     fn is_symlink(&self) -> bool {
-        self.0.file_type().is_symlink()
+        self.meta.file_type().is_symlink()
     }
     #[cfg(feature = "caldav")]
-    fn is_calendar(&self, path: &DavPath) -> bool {
-        crate::caldav::is_path_in_caldav_directory(path)
+    fn is_calendar(&self, _: &DavPath) -> bool {
+        self.is_calendar
     }
     #[cfg(feature = "carddav")]
-    fn is_addressbook(&self, path: &DavPath) -> bool {
-        crate::carddav::is_path_in_carddav_directory(path)
+    fn is_addressbook(&self, _: &DavPath) -> bool {
+        self.is_addressbook
     }
 
     #[cfg(unix)]
     fn executable(&self) -> FsResult<bool> {
-        if self.0.is_file() {
-            return Ok((self.0.permissions().mode() & 0o100) > 0);
+        if self.meta.is_file() {
+            return Ok((self.meta.permissions().mode() & 0o100) > 0);
         }
         Err(FsError::NotImplemented)
     }
@@ -1077,7 +1148,7 @@ impl DavMetaData for LocalFsMetaData {
         // Windows filesystem does not have an executable flag; for regular files we
         // assume they are executable, and for non-files we match the Unix behavior
         // by reporting this as not implemented.
-        if self.0.is_file() {
+        if self.meta.is_file() {
             Ok(true)
         } else {
             Err(FsError::NotImplemented)
@@ -1087,24 +1158,29 @@ impl DavMetaData for LocalFsMetaData {
     // same as the default apache etag.
     #[cfg(unix)]
     fn etag(&self) -> Option<String> {
-        let modified = self.0.modified().ok()?;
+        let modified = self.meta.modified().ok()?;
         let t = modified.duration_since(UNIX_EPOCH).ok()?;
         let t = t.as_secs() * 1000000 + t.subsec_nanos() as u64 / 1000;
         if self.is_file() {
-            Some(format!("{:x}-{:x}-{:x}", self.0.ino(), self.0.len(), t))
+            Some(format!(
+                "{:x}-{:x}-{:x}",
+                self.meta.ino(),
+                self.meta.len(),
+                t
+            ))
         } else {
-            Some(format!("{:x}-{:x}", self.0.ino(), t))
+            Some(format!("{:x}-{:x}", self.meta.ino(), t))
         }
     }
 
     // same as the default apache etag.
     #[cfg(windows)]
     fn etag(&self) -> Option<String> {
-        let modified = self.0.modified().ok()?;
+        let modified = self.meta.modified().ok()?;
         let t = modified.duration_since(UNIX_EPOCH).ok()?;
         let t = t.as_secs() * 1000000 + t.subsec_nanos() as u64 / 1000;
         if self.is_file() {
-            Some(format!("{:x}-{:x}", self.0.len(), t))
+            Some(format!("{:x}-{:x}", self.meta.len(), t))
         } else {
             Some(format!("{:x}", t))
         }

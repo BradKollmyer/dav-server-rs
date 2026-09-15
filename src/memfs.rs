@@ -49,6 +49,10 @@ struct MemFsDirNode {
     props: HashMap<String, DavProp>,
     mtime: SystemTime,
     crtime: SystemTime,
+    #[cfg(feature = "caldav")]
+    is_calendar: bool,
+    #[cfg(feature = "carddav")]
+    is_addressbook: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +70,10 @@ struct MemFsDirEntry {
     is_dir: bool,
     name: Vec<u8>,
     size: u64,
+    #[cfg(feature = "caldav")]
+    is_calendar: bool,
+    #[cfg(feature = "carddav")]
+    is_addressbook: bool,
 }
 
 #[derive(Debug)]
@@ -380,6 +388,38 @@ impl DavFileSystem for MemFs {
         }
         .boxed()
     }
+
+    #[cfg(feature = "caldav")]
+    fn mark_calendar<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
+        async move {
+            let tree = &mut *lock_tree(&self.tree);
+            let node_id = tree.lookup(path.as_bytes())?;
+            match tree.get_node_mut(node_id)? {
+                MemFsNode::Dir(dir) => {
+                    dir.is_calendar = true;
+                    Ok(())
+                }
+                _ => Err(FsError::Forbidden),
+            }
+        }
+        .boxed()
+    }
+
+    #[cfg(feature = "carddav")]
+    fn mark_addressbook<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
+        async move {
+            let tree = &mut *lock_tree(&self.tree);
+            let node_id = tree.lookup(path.as_bytes())?;
+            match tree.get_node_mut(node_id)? {
+                MemFsNode::Dir(dir) => {
+                    dir.is_addressbook = true;
+                    Ok(())
+                }
+                _ => Err(FsError::Forbidden),
+            }
+        }
+        .boxed()
+    }
 }
 
 // small helper.
@@ -540,13 +580,13 @@ impl DavMetaData for MemFsDirEntry {
     }
 
     #[cfg(feature = "caldav")]
-    fn is_calendar(&self, path: &DavPath) -> bool {
-        crate::caldav::is_path_in_caldav_directory(path)
+    fn is_calendar(&self, _: &DavPath) -> bool {
+        self.is_calendar
     }
 
     #[cfg(feature = "carddav")]
-    fn is_addressbook(&self, path: &DavPath) -> bool {
-        crate::carddav::is_path_in_carddav_directory(path)
+    fn is_addressbook(&self, _: &DavPath) -> bool {
+        self.is_addressbook
     }
 }
 
@@ -556,6 +596,10 @@ impl MemFsNode {
             crtime: SystemTime::now(),
             mtime: SystemTime::now(),
             props: HashMap::new(),
+            #[cfg(feature = "caldav")]
+            is_calendar: false,
+            #[cfg(feature = "carddav")]
+            is_addressbook: false,
         })
     }
 
@@ -570,16 +614,29 @@ impl MemFsNode {
 
     // helper to create MemFsDirEntry from a node.
     fn as_dirent(&self, name: &[u8]) -> MemFsDirEntry {
-        let (is_dir, size, mtime, crtime) = match *self {
-            MemFsNode::File(ref file) => (false, file.data.len() as u64, file.mtime, file.crtime),
-            MemFsNode::Dir(ref dir) => (true, 0, dir.mtime, dir.crtime),
-        };
-        MemFsDirEntry {
-            name: name.to_vec(),
-            mtime,
-            crtime,
-            is_dir,
-            size,
+        match self {
+            MemFsNode::File(file) => MemFsDirEntry {
+                name: name.to_vec(),
+                mtime: file.mtime,
+                crtime: file.crtime,
+                is_dir: false,
+                size: file.data.len() as u64,
+                #[cfg(feature = "caldav")]
+                is_calendar: false,
+                #[cfg(feature = "carddav")]
+                is_addressbook: false,
+            },
+            MemFsNode::Dir(dir) => MemFsDirEntry {
+                name: name.to_vec(),
+                mtime: dir.mtime,
+                crtime: dir.crtime,
+                is_dir: true,
+                size: 0,
+                #[cfg(feature = "caldav")]
+                is_calendar: dir.is_calendar,
+                #[cfg(feature = "carddav")]
+                is_addressbook: dir.is_addressbook,
+            },
         }
     }
 

@@ -8,9 +8,7 @@ use crate::fs::*;
 use crate::{DavError, DavInner, DavResult};
 
 impl<C: Clone + Send + Sync + 'static> DavInner<C> {
-    /// RFC 4918 MKCOL. Extended MKCOL (RFC 5689) bodies are not applied here;
-    /// CardDAV address-book identity is path-based (`/addressbooks/<name>`), so
-    /// MKCOL with `CARD:addressbook` outside that prefix is not an address book.
+    /// RFC 4918 MKCOL. Extended MKCOL (RFC 5689) bodies are not applied here.
     pub(crate) async fn handle_mkcol(&self, req: &Request<()>) -> DavResult<Response<Body>> {
         let mut path = self.path(req);
         self.ensure_visible(&path).await?;

@@ -205,6 +205,8 @@ pub fn create_calendar_home_set(prefix: &str, path: &str) -> Element {
 /// Immediate child of `/calendars` (`/calendars/<name>` or `/calendars/<name>/`).
 /// The home itself and nested paths are not calendar collections (RFC 4791 4.2).
 /// Compares prefix-stripped URL bytes, not PathBuf display.
+/// Used for calendar-home-set URLs; collection type is stored on metadata.
+#[allow(dead_code)]
 pub(crate) fn is_path_in_caldav_directory(dav_path: &DavPath) -> bool {
     is_immediate_child_of(
         dav_path.as_bytes(),
