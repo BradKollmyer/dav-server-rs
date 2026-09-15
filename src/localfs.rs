@@ -106,8 +106,7 @@ enum Meta {
 #[allow(unused)]
 fn helper_create_directory(basedir: &Path, _new_dir_name: &str) {
     let new_path = basedir.join(_new_dir_name);
-    std::fs::create_dir_all(&new_path)
-        .expect("Failed to create default directory; verify that 'basedir' is correct.");
+    let _ = std::fs::create_dir_all(&new_path);
 }
 
 /// Open a file or directory with enough access to change timestamps.
@@ -1140,6 +1139,21 @@ mod tests {
             filetime_to_systemtime(116444736000000000 + 10_000_000),
             UNIX_EPOCH + Duration::from_secs(1)
         );
+    }
+
+    #[test]
+    fn helper_create_directory_does_not_panic_when_create_fails() {
+        let tmp = std::env::temp_dir().join(format!(
+            "dav-mkdir-fail-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&tmp, b"not a directory").unwrap();
+        helper_create_directory(&tmp, "calendars");
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]
