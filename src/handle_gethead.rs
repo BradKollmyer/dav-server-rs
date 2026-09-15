@@ -192,10 +192,10 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             trace!("handle_gethead: range header {r:?}");
             use std::ops::Bound::*;
             for range in r.satisfiable_ranges(len) {
-                let (start, mut count, valid) = match range {
-                    (Included(s), Included(e)) if e >= s => (s, e - s + 1, true),
-                    (Included(s), Unbounded) if s <= len => (s, len - s, true),
-                    (Unbounded, Included(n)) if n <= len => (len - n, n, true),
+                let (start, end, valid) = match range {
+                    (Included(s), Included(e)) if e >= s => (s, e, true),
+                    (Included(s), Unbounded) => (s, u64::MAX, true),
+                    (Unbounded, Included(n)) if n <= len => (len - n, u64::MAX, true),
                     _ => (0, 0, false),
                 };
                 if !valid || start >= len {
@@ -207,10 +207,14 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     no_body = true;
                     break;
                 }
-                if start + count > len {
-                    count = len - start;
-                }
-                ranges.push(Range { start, count });
+                // RFC 7233 section 2.1: a last-byte-pos at or past the end of
+                // the representation means the last byte. Clamp before we
+                // compute the count so a huge last-byte-pos cannot overflow.
+                let end = cmp::min(end, len - 1);
+                ranges.push(Range {
+                    start,
+                    count: end - start + 1,
+                });
             }
         }
 

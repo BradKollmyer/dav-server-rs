@@ -2433,6 +2433,55 @@ mod get_delete_copymove_tests {
     }
 
     #[tokio::test]
+    async fn get_range_with_huge_last_byte_pos_is_clamped() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/notes.txt", "hello world").await,
+            StatusCode::CREATED
+        );
+
+        // RFC 7233 section 2.1: a last-byte-pos beyond the end of the
+        // representation means the last byte. This must not overflow.
+        let tail = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/notes.txt")
+                    .header(header::RANGE, "bytes=5-18446744073709551615")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(tail.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            header_str(&tail, "content-range").as_deref(),
+            Some("bytes 5-10/11")
+        );
+        assert_eq!(header_str(&tail, "content-length").as_deref(), Some("6"));
+        let body = resp_to_bytes(tail).await;
+        assert_eq!(body.len(), 6);
+        assert_eq!(&body[..], b" world");
+
+        let whole = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/notes.txt")
+                    .header(header::RANGE, "bytes=0-18446744073709551615")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(whole.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            header_str(&whole, "content-range").as_deref(),
+            Some("bytes 0-10/11")
+        );
+        assert_eq!(header_str(&whole, "content-length").as_deref(), Some("11"));
+        assert_eq!(resp_to_string(whole).await, "hello world");
+    }
+
+    #[tokio::test]
     async fn get_multipart_ranges() {
         let server = setup();
         assert_eq!(
