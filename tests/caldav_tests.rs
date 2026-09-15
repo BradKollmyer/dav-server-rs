@@ -224,16 +224,27 @@ END:VCALENDAR"
     }
 
     #[tokio::test]
-    async fn test_mkcol_garbage_body_is_bad_request() {
+    async fn test_mkcol_garbage_body_is_unsupported_media_type() {
         let server = setup_caldav_server().await;
 
         let req = Request::builder()
             .method("MKCOL")
             .uri("/garbage-col")
-            .body(Body::from("this is not xml"))
+            .header("Content-Type", "xzy-foo/bar-512")
+            .body(Body::from("afafafaf"))
             .unwrap();
         let resp = server.handle(req).await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        let req = Request::builder()
+            .method("MKCOL")
+            .uri("/wrong-root-col")
+            .body(Body::from(
+                r#"<?xml version="1.0"?><D:propfind xmlns:D="DAV:"/>"#,
+            ))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
 
     #[tokio::test]

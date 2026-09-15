@@ -167,7 +167,7 @@ where
             Some(ref url) => {
                 // Host mismatch is an invalid location (condition false), not 502.
                 match DavPath::from_str_and_prefix(url.path(), path.prefix()) {
-                    Ok(p) if davheaders::url_is_same_server(req.uri(), url) => {
+                    Ok(p) if davheaders::request_is_same_server(req, url) => {
                         // anchor davpath in pa.
                         let p: &DavPath = pa.get_or_insert(p);
                         (p, true)

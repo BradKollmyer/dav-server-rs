@@ -171,7 +171,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             None => return Err(StatusCode::BAD_REQUEST.into()),
         };
         // RFC 4918 10.3: Destination on another server is 502 Bad Gateway.
-        if !dest.is_same_server(req.uri()) {
+        if !dest.is_same_server(req) {
             return Err(StatusCode::BAD_GATEWAY.into());
         }
         let dest = DavPath::from_str_and_prefix(&dest.path, &self.prefix)?;

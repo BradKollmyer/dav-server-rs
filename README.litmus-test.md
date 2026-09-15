@@ -1,6 +1,8 @@
 
 # Webdav protocol compliance.
 
+Last run: 2026-09-15, litmus 0.13 against `sample-litmus-server --memfs --auth`.
+
 The standard for webdav compliance testing is [`litmus`](http://www.webdav.org/neon/litmus/),
 which is available at [http://www.webdav.org/neon/litmus/](http://www.webdav.org/neon/litmus/).
 
@@ -17,7 +19,6 @@ Then run the test server (`sample-litmus-server`). For some tests, `litmus`
 assumes that it is using basic authentication, so you must run the server
 with the `--auth` flag.
 ```
-cd webdav-handler-rs
 cargo run --example sample-litmus-server -- --memfs --auth
 ```
 

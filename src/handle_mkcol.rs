@@ -59,11 +59,18 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         let mkcol_body = if body.is_empty() {
             None
         } else {
-            let tree = Element::parse2(Cursor::new(body))?;
-            if tree.name != "mkcol" || tree.namespace.as_deref() != Some(NS_DAV_URI) {
-                return Err(DavError::StatusClose(StatusCode::BAD_REQUEST));
+            // RFC 4918 9.3.1: an unsupported MKCOL entity type is 415.
+            // RFC 5689 `DAV:mkcol` is the only body we accept.
+            match Element::parse2(Cursor::new(body)) {
+                Ok(tree)
+                    if tree.name == "mkcol" && tree.namespace.as_deref() == Some(NS_DAV_URI) =>
+                {
+                    Some(tree)
+                }
+                _ => {
+                    return Err(DavError::StatusClose(StatusCode::UNSUPPORTED_MEDIA_TYPE));
+                }
             }
-            Some(tree)
         };
 
         #[allow(unused_variables)]

@@ -2892,6 +2892,28 @@ mod get_delete_copymove_tests {
     }
 
     #[tokio::test]
+    async fn copy_destination_absolute_url_with_host_header() {
+        let server = setup();
+        assert_eq!(put(&server, "/a.txt", "alpha").await, StatusCode::CREATED);
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("COPY")
+                    .uri("/a.txt")
+                    .header("Host", "127.0.0.1:4918")
+                    .header("Destination", "http://127.0.0.1:4918/copied.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            resp_to_string(get(&server, "/copied.txt").await).await,
+            "alpha"
+        );
+    }
+
+    #[tokio::test]
     async fn copy_destination_other_host_is_bad_gateway() {
         let server = setup();
         assert_eq!(put(&server, "/a.txt", "alpha").await, StatusCode::CREATED);

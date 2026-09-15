@@ -3,7 +3,7 @@ use std::fmt::Display;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use headers::Header;
+use headers::{Header, HeaderMapExt, Host};
 use http::header::{HeaderName, HeaderValue};
 use url::Url;
 
@@ -315,11 +315,32 @@ pub struct Destination {
 
 impl Destination {
     /// RFC 4918 10.3: absolute-path is local; absolute URLs must match the request server.
-    pub(crate) fn is_same_server(&self, request: &http::Uri) -> bool {
+    pub(crate) fn is_same_server(&self, request: &http::Request<()>) -> bool {
         match self.abs_url {
             None => true,
-            Some(ref url) => url_is_same_server(request, url),
+            Some(ref url) => request_is_same_server(request, url),
         }
+    }
+}
+
+/// True if `url` names a resource on the same server as `request`.
+///
+/// Origin-form request URIs have no host; then the `Host` header is the
+/// server identity. Host comparison is case-insensitive; default ports
+/// 80/443 match an omitted port. If neither URI nor `Host` supplies a
+/// host, an absolute `url` with a host is off-server.
+pub(crate) fn request_is_same_server(request: &http::Request<()>, url: &Url) -> bool {
+    if request.uri().host().is_some() {
+        url_is_same_server(request.uri(), url)
+    } else if let Some(host) = request.headers().typed_get::<Host>() {
+        same_server(
+            request.uri().scheme_str(),
+            Some(host.hostname()),
+            host.port(),
+            url,
+        )
+    } else {
+        url_is_same_server(request.uri(), url)
     }
 }
 
@@ -327,19 +348,33 @@ impl Destination {
 /// Host comparison is case-insensitive; default ports 80/443 match an omitted port.
 /// If the request URI has no host, an absolute `url` with a host is off-server.
 pub(crate) fn url_is_same_server(request: &http::Uri, url: &Url) -> bool {
-    match (request.host(), url.host_str()) {
+    same_server(
+        request.scheme_str(),
+        request.host(),
+        request.port_u16(),
+        url,
+    )
+}
+
+fn same_server(
+    req_scheme: Option<&str>,
+    req_host: Option<&str>,
+    req_port: Option<u16>,
+    url: &Url,
+) -> bool {
+    match (req_host, url.host_str()) {
         (Some(a), Some(b)) if a.eq_ignore_ascii_case(b) => {}
         (None, None) => {}
         _ => return false,
     }
 
-    if let Some(req_scheme) = request.scheme_str()
+    if let Some(req_scheme) = req_scheme
         && !req_scheme.eq_ignore_ascii_case(url.scheme())
     {
         return false;
     }
 
-    let req_port = effective_port(request.scheme_str(), request.port_u16());
+    let req_port = effective_port(req_scheme, req_port);
     let url_port = effective_port(Some(url.scheme()), url.port());
     match (req_port, url_port) {
         (Some(a), Some(b)) => a == b,
@@ -1023,6 +1058,13 @@ mod tests {
     fn url(s: &str) -> Url {
         s.parse().unwrap()
     }
+    fn req(uri: &str, host: Option<&str>) -> http::Request<()> {
+        let mut builder = http::Request::builder().uri(uri);
+        if let Some(host) = host {
+            builder = builder.header("Host", host);
+        }
+        builder.body(()).unwrap()
+    }
 
     #[test]
     fn destination_absolute_path_is_local() {
@@ -1030,8 +1072,18 @@ mod tests {
         let mut iter = std::iter::once(&hdrval);
         let dest = Destination::decode(&mut iter).unwrap();
         assert_eq!(dest.path, "/copied.txt");
-        assert!(dest.is_same_server(&uri("/a.txt")));
-        assert!(dest.is_same_server(&uri("http://example.com/a.txt")));
+        assert!(dest.is_same_server(&req("/a.txt", None)));
+        assert!(dest.is_same_server(&req("http://example.com/a.txt", None)));
+    }
+
+    #[test]
+    fn destination_absolute_url_matches_host_header() {
+        let hdrval = HeaderValue::from_static("http://127.0.0.1:4918/copied.txt");
+        let mut iter = std::iter::once(&hdrval);
+        let dest = Destination::decode(&mut iter).unwrap();
+        assert!(dest.is_same_server(&req("/a.txt", Some("127.0.0.1:4918"))));
+        assert!(!dest.is_same_server(&req("/a.txt", Some("evil.example"))));
+        assert!(!dest.is_same_server(&req("/a.txt", None)));
     }
 
     #[test]
