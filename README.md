@@ -184,7 +184,7 @@ async fn main() {
 
 ### Building.
 
-This crate uses std::future::Future and async/await, so it only works with Rust 1.39 and up.
+This crate uses the 2024 edition, so it requires Rust 1.85 or later.
 
 ### Testing.
 
