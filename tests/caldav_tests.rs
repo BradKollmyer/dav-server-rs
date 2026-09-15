@@ -148,6 +148,80 @@ END:VCALENDAR"
     }
 
     #[tokio::test]
+    async fn test_mkcalendar_missing_parent_is_conflict() {
+        let server = setup_caldav_server();
+
+        let req = Request::builder()
+            .method("MKCALENDAR")
+            .uri("/no-such-parent/calendar")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_mkcalendar_garbage_body_is_bad_request() {
+        let server = setup_caldav_server();
+
+        let req = Request::builder()
+            .method("MKCALENDAR")
+            .uri("/calendars/garbage-cal")
+            .body(Body::from("this is not xml"))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_mkcalendar_sets_displayname() {
+        let server = setup_caldav_server();
+
+        let mkcalendar_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:mkcalendar xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:set>
+    <D:prop>
+      <D:displayname>Lisa's Events</D:displayname>
+    </D:prop>
+  </D:set>
+</C:mkcalendar>"#;
+
+        let req = Request::builder()
+            .method("MKCALENDAR")
+            .uri("/calendars/named-calendar")
+            .body(Body::from(mkcalendar_body.to_string()))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:displayname/>
+  </D:prop>
+</D:propfind>"#;
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/calendars/named-calendar")
+            .header("Depth", "0")
+            .body(Body::from(propfind_body))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("Lisa's Events"),
+            "displayname missing: {body_str}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_calendar_propfind() {
         let server = setup_caldav_server2().await;
 

@@ -7,8 +7,10 @@ use xml::reader::{EventReader, XmlEvent};
 use xmltree::{Element, XMLNode};
 
 use crate::body::Body;
+use crate::conditional::*;
 use crate::errors::*;
 use crate::fs::*;
+use crate::xmltree_ext::*;
 use crate::{DavInner, DavResult};
 
 use crate::async_stream::AsyncStream;
@@ -97,17 +99,59 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     pub(crate) async fn handle_mkcalendar(
         &self,
         req: &Request<()>,
-        _body: &[u8],
+        body: &[u8],
     ) -> DavResult<Response<Body>> {
         let path = self.path(req);
+        self.ensure_visible(&path).await?;
+        let meta = self.fs.metadata(&path, &self.credentials).await;
 
-        // Check if the collection already exists
-        if self.fs.metadata(&path, &self.credentials).await.is_ok() {
-            return Err(DavError::StatusClose(StatusCode::METHOD_NOT_ALLOWED));
+        let res = if_match_get_tokens(
+            req,
+            meta.as_ref().map(|v| v.as_ref()).ok(),
+            self.fs.as_ref(),
+            &self.ls,
+            &path,
+            &self.credentials,
+        )
+        .await;
+        let tokens = match res {
+            Ok(t) => t,
+            Err(s) => return Err(DavError::Status(s)),
+        };
+
+        if let Some(ref locksystem) = self.ls {
+            let principal = self.principal.as_deref();
+            if let Err(_l) = locksystem
+                .check(&path, principal, false, false, &tokens)
+                .await
+            {
+                return Err(DavError::Status(StatusCode::LOCKED));
+            }
         }
 
-        // Create the calendar collection
-        self.fs.create_dir(&path, &self.credentials).await?;
+        let mkcalendar = if body.is_empty() {
+            None
+        } else {
+            let tree = Element::parse2(Cursor::new(body))?;
+            if tree.name != "mkcalendar" || tree.namespace.as_deref() != Some(NS_CALDAV_URI) {
+                return Err(DavError::StatusClose(StatusCode::BAD_REQUEST));
+            }
+            Some(tree)
+        };
+
+        match self.fs.create_dir(&path, &self.credentials).await {
+            Err(FsError::Exists) => return Err(DavError::Status(StatusCode::METHOD_NOT_ALLOWED)),
+            Err(FsError::NotFound) => return Err(DavError::Status(StatusCode::CONFLICT)),
+            Err(e) => return Err(DavError::FsError(e)),
+            Ok(()) => {}
+        }
+
+        if let Some(tree) = mkcalendar {
+            #[cfg(feature = "proppatch")]
+            self.apply_set_props(&path, &tree).await?;
+            #[cfg(not(feature = "proppatch"))]
+            let _ = tree;
+        }
 
         let mut resp = Response::new(Body::empty());
         *resp.status_mut() = StatusCode::CREATED;

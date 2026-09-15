@@ -704,6 +704,39 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         Ok(res)
     }
+
+    /// Apply DAV:set / DAV:prop children as dead properties (PROPPATCH path).
+    #[cfg(all(feature = "caldav", feature = "proppatch"))]
+    pub(crate) async fn apply_set_props(&self, path: &DavPath, tree: &Element) -> DavResult<()> {
+        let can_deadprop = self.fs.have_props(path, &self.credentials).await;
+        if !can_deadprop {
+            return Ok(());
+        }
+
+        let props: Vec<&Element> = tree
+            .child_elems_iter()
+            .filter(|elem| elem.name == "set")
+            .flat_map(|elem| {
+                elem.child_elems_iter()
+                    .filter(|e| e.name == "prop")
+                    .flat_map(|e| e.child_elems_iter())
+            })
+            .collect();
+
+        let mut patch = Vec::new();
+        for n in props {
+            match self.liveprop_set(n, can_deadprop) {
+                StatusCode::CONTINUE => patch.push((true, element_to_davprop_full(n))),
+                StatusCode::OK => {}
+                s => return Err(DavError::Status(s)),
+            }
+        }
+
+        if !patch.is_empty() {
+            self.fs.patch_props(path, patch, &self.credentials).await?;
+        }
+        Ok(())
+    }
 }
 
 impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
