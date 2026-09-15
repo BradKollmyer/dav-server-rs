@@ -746,12 +746,16 @@ pub trait DavMetaData: Debug + Send + Sync + DynClone {
     fn modified(&self) -> FsResult<SystemTime>;
     /// File or directory (aka collection).
     fn is_dir(&self) -> bool;
-    /// Is Calendar collection?
+    /// Is Calendar collection? Default: `false`.
     #[cfg(feature = "caldav")]
-    fn is_calendar(&self, path: &DavPath) -> bool;
-    /// Is Address Book collection?
+    fn is_calendar(&self, _: &DavPath) -> bool {
+        false
+    }
+    /// Is Address Book collection? Default: `false`.
     #[cfg(feature = "carddav")]
-    fn is_addressbook(&self, path: &DavPath) -> bool;
+    fn is_addressbook(&self, _: &DavPath) -> bool {
+        false
+    }
     /// Is this a symbolic link? Must be implemented so that hide_symlinks is able to work.
     fn is_symlink(&self) -> bool;
 
@@ -895,5 +899,38 @@ mod tests {
         let err = FsError::from(&io::Error::new(ErrorKind::InvalidInput, "invalid seek"));
         assert_ne!(err, FsError::NotImplemented);
         assert_eq!(err, FsError::GeneralFailure);
+    }
+}
+
+// Compile-only check: third-party filesystems need not implement is_calendar /
+// is_addressbook when caldav/carddav are enabled.
+#[cfg(all(test, feature = "caldav"))]
+mod default_caldav_metadata {
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    struct MinimalMeta;
+
+    impl DavMetaData for MinimalMeta {
+        fn len(&self) -> u64 {
+            0
+        }
+        fn modified(&self) -> FsResult<SystemTime> {
+            Ok(UNIX_EPOCH)
+        }
+        fn is_dir(&self) -> bool {
+            false
+        }
+        fn is_symlink(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn default_is_calendar_is_false() {
+        let path = DavPath::new("/").unwrap();
+        assert!(!MinimalMeta.is_calendar(&path));
+        #[cfg(feature = "carddav")]
+        assert!(!MinimalMeta.is_addressbook(&path));
     }
 }
