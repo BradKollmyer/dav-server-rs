@@ -816,10 +816,8 @@ impl Stream for LocalFsReadDir {
             Some(Err(err)) => {
                 // fuse the iterator.
                 this.iterator.take();
-                // finish the cache.
-                if let Some(ref mut nb) = this.dir_cache {
-                    nb.finish();
-                }
+                // Do not finish the cache: a partial listing must not be treated
+                // as complete, or missing ._ files would 404 until expiry.
                 // return error of stream.
                 Poll::Ready(Some(Err(err.into())))
             }
@@ -1139,6 +1137,56 @@ mod tests {
             filetime_to_systemtime(116444736000000000 + 10_000_000),
             UNIX_EPOCH + Duration::from_secs(1)
         );
+    }
+
+    #[test]
+    fn readdir_error_does_not_finish_appledouble_cache() {
+        let dir = std::env::temp_dir().join(format!(
+            "dav-readdir-err-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fs = LocalFs::new(&dir, false, false, true);
+        let mut strm = LocalFsReadDir {
+            fs: (*fs).clone(),
+            do_meta: ReadDirMeta::None,
+            buffer: {
+                let mut q = VecDeque::new();
+                q.push_back(Err(io::Error::other("readdir failed")));
+                q
+            },
+            dir_cache: Some(DUCacheBuilder::start(dir.clone())),
+            iterator: None,
+            fut: None,
+        };
+        let waker = futures_util::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let poll = Pin::new(&mut strm).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Some(Err(_)))));
+        assert!(!fs.is_notfound(&dir.join("._nope")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn readdir_finish_marks_appledouble_cache_complete() {
+        let dir = std::env::temp_dir().join(format!(
+            "dav-readdir-eof-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fs = LocalFs::new(&dir, false, false, true);
+        let mut cache = DUCacheBuilder::start(dir.clone());
+        cache.finish();
+        assert!(fs.is_notfound(&dir.join("._nope")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
