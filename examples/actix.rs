@@ -5,7 +5,7 @@ use dav_server::actix::*;
 use dav_server::{DavHandler, fakels::FakeLs, localfs::LocalFs};
 
 pub async fn dav_handler(req: DavRequest, davhandler: web::Data<DavHandler>) -> DavResponse {
-    davhandler.handle(req.request).await.into()
+    req.handle(&davhandler).await.into()
 }
 
 #[actix_web::main]

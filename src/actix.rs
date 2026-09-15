@@ -8,7 +8,7 @@
 //! use actix_web::web;
 //!
 //! pub async fn dav_handler(req: DavRequest, davhandler: web::Data<DavHandler>) -> DavResponse {
-//!     davhandler.handle(req.request).await.into()
+//!     req.handle(&davhandler).await.into()
 //! }
 //! ```
 //!
@@ -26,6 +26,8 @@ use bytes::Bytes;
 use futures_util::Stream;
 use pin_project_lite::pin_project;
 
+use crate::DavHandler;
+
 /// http::Request compatibility.
 ///
 /// Wraps `http::Request<DavBody>` and implements `actix_web::FromRequest`.
@@ -38,6 +40,19 @@ impl DavRequest {
     /// Returns the request path minus the tail.
     pub fn prefix(&self) -> Option<&str> {
         self.prefix.as_deref()
+    }
+
+    /// Run `handler` on this request, stripping the route prefix when present.
+    ///
+    /// When `prefix` is `None`, this is the same as `handler.handle(self.request)`.
+    pub async fn handle(self, handler: &DavHandler) -> http::Response<crate::body::Body> {
+        match self.prefix {
+            Some(prefix) => {
+                let config = DavHandler::builder().strip_prefix(prefix);
+                handler.handle_with(config, self.request).await
+            }
+            None => handler.handle(self.request).await,
+        }
     }
 }
 
@@ -54,7 +69,12 @@ impl FromRequest for DavRequest {
             builder = builder.header(name.as_str(), value.as_ref());
         }
         let path = req.path();
-        let tail = req.match_info().unprocessed();
+        // `{tail:.*}` consumes the rest of the resource, so `unprocessed()` is
+        // empty; the named capture is the mount tail in that case.
+        let tail = req
+            .match_info()
+            .get("tail")
+            .unwrap_or_else(|| req.match_info().unprocessed());
         let prefix = match &path[..path.len() - tail.len()] {
             "" | "/" => None,
             x => Some(x.to_string()),
