@@ -853,7 +853,7 @@ impl LocalFsDirEntry {
             Meta::Fs(ref fs) => {
                 let fullpath = self.entry.path();
                 let ft = fs
-                    .blocking(move || std::fs::metadata(&fullpath))
+                    .blocking(move || std::fs::symlink_metadata(&fullpath))
                     .await?
                     .file_type();
                 Ok(match is {
@@ -878,7 +878,7 @@ impl DavDirEntry for LocalFsDirEntry {
             }
             Meta::Fs(ref fs) => {
                 let fullpath = self.entry.path();
-                fs.blocking(move || match std::fs::metadata(&fullpath) {
+                fs.blocking(move || match std::fs::symlink_metadata(&fullpath) {
                     Ok(meta) => Ok(Box::new(LocalFsMetaData(meta)) as Box<dyn DavMetaData>),
                     Err(e) => Err(e.into()),
                 })
@@ -1186,6 +1186,42 @@ mod tests {
         let mut cache = DUCacheBuilder::start(dir.clone());
         cache.finish();
         assert!(fs.is_notfound(&dir.join("._nope")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn readdir_none_reports_symlink() {
+        use futures_util::StreamExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "dav-readdir-none-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("target"), b"data").unwrap();
+        std::os::unix::fs::symlink(dir.join("target"), dir.join("link")).unwrap();
+
+        let fs = LocalFs::new(&dir, false, false, false);
+        let path = DavPath::new("/").unwrap();
+        let mut strm = DavFileSystem::read_dir(&*fs, &path, ReadDirMeta::None)
+            .await
+            .unwrap();
+
+        let mut found = false;
+        while let Some(entry) = strm.next().await {
+            let entry = entry.unwrap();
+            if entry.name() == b"link" {
+                assert!(entry.is_symlink().await.unwrap());
+                assert!(entry.metadata().await.unwrap().is_symlink());
+                found = true;
+            }
+        }
+        assert!(found, "symlink directory entry not found");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
