@@ -245,6 +245,19 @@ struct QuotaCache {
     q_total: Option<u64>,
 }
 
+#[cfg(any(feature = "caldav", feature = "carddav"))]
+fn supported_report_elem(prefix: &str, report: &str) -> Element {
+    Element::new3(
+        "D",
+        "supported-report",
+        vec![Element::new3(
+            "D",
+            "report",
+            vec![Element::new3(prefix, report, vec![])],
+        )],
+    )
+}
+
 fn init_staticprop(p: &[&str]) -> Vec<Element> {
     let mut v = Vec::new();
     for a in p {
@@ -919,10 +932,24 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
             Some(NS_DAV_URI) => {
                 pfx = "D";
                 match prop.name.as_str() {
-                    #[cfg(feature = "caldav")]
+                    #[cfg(any(feature = "caldav", feature = "carddav"))]
                     "supported-report-set" => {
-                        let mut ns: xmltree::Namespace = xmltree::Namespace::empty();
-                        ns.put("C".to_string(), NS_CALDAV_URI.to_string());
+                        let mut ns = xmltree::Namespace::empty();
+                        let mut children = Vec::new();
+
+                        #[cfg(feature = "caldav")]
+                        if meta.is_calendar(path) {
+                            ns.put("C".to_string(), NS_CALDAV_URI.to_string());
+                            children.push(supported_report_elem("C", "calendar-query"));
+                            children.push(supported_report_elem("C", "calendar-multiget"));
+                        }
+
+                        #[cfg(feature = "carddav")]
+                        if meta.is_addressbook(path) {
+                            ns.put("CARD".to_string(), NS_CARDDAV_URI.to_string());
+                            children.push(supported_report_elem("CARD", "addressbook-query"));
+                            children.push(supported_report_elem("CARD", "addressbook-multiget"));
+                        }
 
                         return Ok(StatusElement {
                             status: StatusCode::OK,
@@ -932,29 +959,7 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                                 namespaces: Some(ns),
                                 name: "supported-report-set".to_string(),
                                 attributes: HashMap::new(),
-                                children: vec![
-                                    Element::new3(
-                                        "D",
-                                        "supported-report",
-                                        vec![Element::new3(
-                                            "D",
-                                            "report",
-                                            vec![Element::new3("C", "calendar-query", vec![])],
-                                        )],
-                                    ),
-                                    Element::new3(
-                                        "D",
-                                        "supported-report",
-                                        vec![Element::new3(
-                                            "D",
-                                            "report",
-                                            vec![Element::new3("C", "calendar-multiget", vec![])],
-                                        )],
-                                    ),
-                                ]
-                                .into_iter()
-                                .map(XMLNode::Element)
-                                .collect(),
+                                children: children.into_iter().map(XMLNode::Element).collect(),
                             },
                         });
                     }

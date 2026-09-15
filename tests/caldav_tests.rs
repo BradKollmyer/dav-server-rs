@@ -242,6 +242,36 @@ END:VCALENDAR"
     }
 
     #[tokio::test]
+    async fn test_supported_report_set_on_calendar() {
+        let server = setup_caldav_server2().await;
+
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:supported-report-set/>
+  </D:prop>
+</D:propfind>"#;
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/calendars/my-calendar")
+            .header("Depth", "0")
+            .body(Body::from(propfind_body))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("calendar-query"),
+            "calendar collection should advertise calendar-query: {body_str}"
+        );
+        assert!(body_str.contains("calendar-multiget"));
+        assert!(!body_str.contains("addressbook-query"));
+        assert!(!body_str.contains("free-busy-query"));
+    }
+
+    #[tokio::test]
     async fn test_calendar_event_put() {
         let server = setup_caldav_server2().await;
 

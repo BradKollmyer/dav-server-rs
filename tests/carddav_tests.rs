@@ -168,6 +168,43 @@ mod carddav_tests {
     }
 
     #[tokio::test]
+    async fn test_supported_report_set_on_addressbook() {
+        let server = setup_carddav_server();
+
+        let req = Request::builder()
+            .method("MKADDRESSBOOK")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::empty())
+            .unwrap();
+        let _ = server.handle(req).await;
+
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:supported-report-set/>
+  </D:prop>
+</D:propfind>"#;
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/addressbooks/my-contacts")
+            .header("Depth", "0")
+            .body(Body::from(propfind_body))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("addressbook-query"),
+            "addressbook collection should advertise addressbook-query: {body_str}"
+        );
+        assert!(body_str.contains("addressbook-multiget"));
+        assert!(!body_str.contains("calendar-query"));
+        assert!(!body_str.contains("free-busy-query"));
+    }
+
+    #[tokio::test]
     async fn test_addressbook_home_set() {
         let server = setup_carddav_server();
 
