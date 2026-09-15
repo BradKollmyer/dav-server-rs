@@ -424,6 +424,17 @@ impl DavDirEntry for MemFsDirEntry {
     }
 }
 
+/// Grow `data` to `end` bytes, zero-filled, without aborting the process
+/// when the allocation fails.
+fn grow_to(data: &mut Vec<u8>, end: usize) -> FsResult<()> {
+    if end > data.len() {
+        data.try_reserve_exact(end - data.len())
+            .map_err(|_| FsError::InsufficientStorage)?;
+        data.resize(end, 0);
+    }
+    Ok(())
+}
+
 impl DavFile for MemFsFile {
     fn metadata(&'_ mut self) -> FsFuture<'_, Box<dyn DavMetaData>> {
         async move {
@@ -442,7 +453,7 @@ impl DavFile for MemFsFile {
             let file = node.as_file()?;
             let curlen = file.data.len();
             let mut start = self.pos;
-            let mut end = self.pos + count;
+            let mut end = self.pos.saturating_add(count);
             if start > curlen {
                 start = curlen
             }
@@ -464,10 +475,8 @@ impl DavFile for MemFsFile {
             if self.append {
                 self.pos = file.data.len();
             }
-            let end = self.pos + buf.len();
-            if end > file.data.len() {
-                file.data.resize(end, 0);
-            }
+            let end = self.pos.checked_add(buf.len()).ok_or(FsError::TooLarge)?;
+            grow_to(&mut file.data, end)?;
             file.data[self.pos..end].copy_from_slice(&buf);
             self.pos = end;
             file.mtime = SystemTime::now();
@@ -484,10 +493,11 @@ impl DavFile for MemFsFile {
             if self.append {
                 self.pos = file.data.len();
             }
-            let end = self.pos + buf.remaining();
-            if end > file.data.len() {
-                file.data.resize(end, 0);
-            }
+            let end = self
+                .pos
+                .checked_add(buf.remaining())
+                .ok_or(FsError::TooLarge)?;
+            grow_to(&mut file.data, end)?;
             while buf.has_remaining() {
                 let b = buf.chunk();
                 let len = b.len();
@@ -507,9 +517,11 @@ impl DavFile for MemFsFile {
 
     fn seek(&'_ mut self, pos: SeekFrom) -> FsFuture<'_, u64> {
         async move {
+            let invalid_seek =
+                || FsError::from(Error::new(ErrorKind::InvalidInput, "invalid seek"));
             let (start, offset): (u64, i64) = match pos {
                 SeekFrom::Start(npos) => {
-                    self.pos = npos as usize;
+                    self.pos = usize::try_from(npos).map_err(|_| invalid_seek())?;
                     return Ok(npos);
                 }
                 SeekFrom::Current(npos) => (self.pos as u64, npos),
@@ -520,15 +532,14 @@ impl DavFile for MemFsFile {
                     (curlen, npos)
                 }
             };
-            if offset < 0 {
-                if -offset as u64 > start {
-                    return Err(Error::new(ErrorKind::InvalidInput, "invalid seek").into());
-                }
-                self.pos = (start - (-offset as u64)) as usize;
+            let npos = if offset < 0 {
+                start.checked_sub(offset.unsigned_abs())
             } else {
-                self.pos = (start + offset as u64) as usize;
+                start.checked_add(offset as u64)
             }
-            Ok(self.pos as u64)
+            .ok_or_else(invalid_seek)?;
+            self.pos = usize::try_from(npos).map_err(|_| invalid_seek())?;
+            Ok(npos)
         }
         .boxed()
     }
@@ -733,6 +744,44 @@ mod tests {
         if !data.is_empty() {
             f.write_bytes(Bytes::copy_from_slice(data)).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn write_past_usize_max_is_an_error_not_a_panic() {
+        let fs = MemFs::new();
+        create_file(&fs, "/file", b"hello").await;
+
+        let mut f = DavFileSystem::open(&*fs, &path("/file"), OpenOptions::write())
+            .await
+            .unwrap();
+        // Seeking to u64::MAX either fails outright (32-bit) or succeeds and
+        // makes the following write overflow the position; neither may panic.
+        let result = match f.seek(SeekFrom::Start(u64::MAX)).await {
+            Ok(_) => f.write_bytes(Bytes::from_static(b"x")).await,
+            Err(e) => Err(e),
+        };
+        assert!(result.is_err(), "{result:?}");
+
+        let result = match f.seek(SeekFrom::Start(u64::MAX)).await {
+            Ok(_) => f.write_buf(Box::new(Bytes::from_static(b"x"))).await,
+            Err(e) => Err(e),
+        };
+        assert!(result.is_err(), "{result:?}");
+
+        // Reading at a huge offset just returns nothing.
+        if f.seek(SeekFrom::Start(u64::MAX)).await.is_ok() {
+            assert!(f.read_bytes(16).await.unwrap().is_empty());
+        }
+        // Seeking outside the u64 range is rejected.
+        if f.seek(SeekFrom::Start(u64::MAX)).await.is_ok() {
+            assert!(f.seek(SeekFrom::Current(1)).await.is_err());
+        }
+        f.seek(SeekFrom::End(0)).await.unwrap();
+        assert!(f.seek(SeekFrom::Current(-100)).await.is_err());
+
+        // The file is untouched.
+        f.seek(SeekFrom::Start(0)).await.unwrap();
+        assert_eq!(&f.read_bytes(16).await.unwrap()[..], b"hello");
     }
 
     #[tokio::test]

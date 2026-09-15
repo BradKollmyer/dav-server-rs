@@ -212,6 +212,17 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             Err(_) => return Err(DavError::StatusClose(SC::BAD_REQUEST)),
         }
 
+        // The end of the range must fit in a u64, and in a usize for
+        // filesystems that keep the file in memory.
+        if do_range
+            && !oo.append
+            && start
+                .checked_add(count)
+                .is_none_or(|end| usize::try_from(end).is_err())
+        {
+            return Err(DavError::StatusClose(SC::RANGE_NOT_SATISFIABLE));
+        }
+
         // check the If and If-* headers.
         let tokens = if_match_get_tokens(
             req,

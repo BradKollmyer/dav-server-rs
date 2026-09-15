@@ -3533,6 +3533,31 @@ mod partial_put_tests {
             .await;
         assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
     }
+
+    #[tokio::test]
+    async fn put_content_range_at_u64_max_is_not_satisfiable() {
+        let server = setup();
+        assert_eq!(put(&server, "/file.txt", BASE).await, StatusCode::CREATED);
+
+        let max = u64::MAX.to_string();
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/file.txt")
+                    .header("Content-Range", format!("bytes {max}-{max}/*"))
+                    .header("Content-Length", "1")
+                    .body(Body::from("x"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+
+        let resp = patch(&server, "/file.txt", &format!("bytes={max}-{max}"), "x").await;
+        assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+
+        assert_eq!(get_body(&server, "/file.txt").await.1, BASE);
+    }
 }
 
 #[cfg(feature = "memfs")]
