@@ -504,7 +504,7 @@ where
                     // Ofcourse the below is not sufficient. Fixes welcome.
                     resp = resp
                         .header("Cache-Control", "no-store, no-cache, must-revalidate")
-                        .header("Progma", "no-cache")
+                        .header("Pragma", "no-cache")
                         .header("Expires", "0")
                         .header("Vary", "*");
                 }
@@ -638,5 +638,32 @@ where
             #[cfg(not(feature = "carddav"))]
             DavMethod::MkAddressbook => Err(DavError::StatusClose(StatusCode::NOT_IMPLEMENTED)),
         }
+    }
+}
+
+#[cfg(all(test, feature = "memfs"))]
+mod tests {
+    use super::*;
+    use crate::memfs::MemFs;
+
+    #[tokio::test]
+    async fn windows_404_includes_pragma_no_cache() {
+        let handler = DavHandler::builder()
+            .filesystem(MemFs::new())
+            .build_handler();
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/missing")
+            .header("user-agent", "Microsoft-WebDAV-MiniRedir/10.0.19041")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = handler.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp.headers().get("pragma").and_then(|v| v.to_str().ok()),
+            Some("no-cache")
+        );
     }
 }
