@@ -297,6 +297,18 @@ impl DavPath {
             fullpath: segs.join(&b'/').to_vec(),
         }
     }
+
+    /// True if this path is inside `collection` (not the collection itself).
+    ///
+    /// Compares prefix-stripped bytes with `collection` as a directory prefix.
+    pub(crate) fn is_in_collection(&self, collection: &DavPath) -> bool {
+        let href = self.as_bytes();
+        let mut prefix = collection.as_bytes().to_vec();
+        if !prefix.ends_with(b"/") {
+            prefix.push(b'/');
+        }
+        href.starts_with(&prefix) && href != prefix.as_slice()
+    }
 }
 
 impl std::ops::Deref for DavPath {

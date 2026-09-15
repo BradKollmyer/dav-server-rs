@@ -421,6 +421,54 @@ END:VCALENDAR"
         );
     }
 
+    #[tokio::test]
+    async fn test_calendar_multiget_confines_hrefs_to_collection() {
+        let server = setup_caldav_server2().await;
+        let inside = create_ics_data("inside-event", "Inside Event");
+        let resp = put_ics_data(&server, inside, "/calendars/my-calendar/event.ics").await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let outside = create_ics_data("outside-event", "Outside Event");
+        let resp = put_ics_data(&server, outside, "/other.ics").await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <D:href>/calendars/my-calendar/event.ics</D:href>
+  <D:href>/other.ics</D:href>
+</C:calendar-multiget>"#;
+
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/calendars/my-calendar")
+            .body(Body::from(report_body))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("Inside Event"),
+            "in-collection event missing: {body_str}"
+        );
+        assert!(
+            !body_str.contains("Outside Event"),
+            "outsider calendar-data must not be returned: {body_str}"
+        );
+        assert!(
+            body_str.contains("/other.ics"),
+            "outsider href missing from 207: {body_str}"
+        );
+        assert!(
+            body_str.contains("404 Not Found"),
+            "outsider href must be 404: {body_str}"
+        );
+    }
+
     #[test]
     fn test_is_calendar_data() {
         let valid_ical = b"BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR\n";

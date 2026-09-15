@@ -322,6 +322,86 @@ END:VCARD"#;
         );
     }
 
+    #[tokio::test]
+    async fn test_addressbook_multiget_confines_hrefs_to_collection() {
+        let server = setup_carddav_server();
+
+        let req = Request::builder()
+            .method("MKADDRESSBOOK")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::empty())
+            .unwrap();
+        let _ = server.handle(req).await;
+
+        let inside = r#"BEGIN:VCARD
+VERSION:3.0
+UID:inside-contact@example.com
+FN:Inside Contact
+N:Contact;Inside;;;
+END:VCARD"#;
+
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/addressbooks/my-contacts/contact.vcf")
+            .header("Content-Type", "text/vcard")
+            .body(Body::from(inside))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let outside = r#"BEGIN:VCARD
+VERSION:3.0
+UID:outside-contact@example.com
+FN:Outside Contact
+N:Contact;Outside;;;
+END:VCARD"#;
+
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/other.vcf")
+            .header("Content-Type", "text/vcard")
+            .body(Body::from(outside))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<CARD:addressbook-multiget xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
+  <D:prop>
+    <CARD:address-data/>
+  </D:prop>
+  <D:href>/addressbooks/my-contacts/contact.vcf</D:href>
+  <D:href>/other.vcf</D:href>
+</CARD:addressbook-multiget>"#;
+
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::from(report_body))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("Inside Contact"),
+            "in-collection contact missing: {body_str}"
+        );
+        assert!(
+            !body_str.contains("Outside Contact"),
+            "outsider address-data must not be returned: {body_str}"
+        );
+        assert!(
+            body_str.contains("/other.vcf"),
+            "outsider href missing from 207: {body_str}"
+        );
+        assert!(
+            body_str.contains("404 Not Found"),
+            "outsider href must be 404: {body_str}"
+        );
+    }
+
     #[test]
     fn test_is_vcard_data() {
         let valid_vcard = b"BEGIN:VCARD\nVERSION:3.0\nFN:Test\nEND:VCARD\n";

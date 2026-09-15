@@ -45,7 +45,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                 self.handle_addressbook_query(&path, query).await
             }
             CardDavReportType::AddressBookMultiget { hrefs } => {
-                self.handle_addressbook_multiget(hrefs).await
+                self.handle_addressbook_multiget(&path, hrefs).await
             }
         }
     }
@@ -365,12 +365,18 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             .await
     }
 
-    async fn handle_addressbook_multiget(&self, hrefs: Vec<String>) -> DavResult<Response<Body>> {
+    async fn handle_addressbook_multiget(
+        &self,
+        path: &DavPath,
+        hrefs: Vec<String>,
+    ) -> DavResult<Response<Body>> {
         let mut results = Vec::new();
         let mut missing_hrefs: Vec<String> = Vec::new();
 
         for href in &hrefs {
+            // RFC 6352 6.3: hrefs must be address-object resources in this collection.
             if let Ok(item_path) = DavPath::from_str_and_prefix(href, &self.prefix)
+                && item_path.is_in_collection(path)
                 && let Ok(mut file) = self
                     .fs
                     .open(&item_path, OpenOptions::read(), &self.credentials)
