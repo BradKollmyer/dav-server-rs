@@ -49,16 +49,20 @@
 //! checks][README_litmus] of the Webdav Litmus Test testsuite. That's all of the base
 //! [RFC4918] webdav specification.
 //!
-//! CalDAV support implements the core CalDAV specification from [RFC4791], including:
-//! - Calendar collections (MKCALENDAR method)
-//! - Calendar queries (REPORT method with calendar-query; `CALDAV:filter` is required)
-//! - Calendar multiget (REPORT method with calendar-multiget; hrefs must be in the collection)
+//! CalDAV support is a partial [RFC4791] implementation, not full coverage:
+//! - Calendar collections (MKCALENDAR) at `/calendars/<name>` (immediate children only)
+//! - Calendar queries (REPORT `calendar-query`; `CALDAV:filter` is required)
 //! - Nested `comp-filter` evaluation, plus `prop-filter`/`text-match` on property values
-//! - CalDAV properties (supported-calendar-component-set, etc.)
-//! - iCalendar data validation and processing
+//! - Calendar multiget (REPORT `calendar-multiget`; hrefs must be in the collection)
+//! - CalDAV properties (`supported-calendar-component-set`, `max-resource-size` 1MB, etc.)
+//! - `free-busy-query` returns `501 Not Implemented`
 //!
-//! CardDAV support implements the core of [RFC6352]: MKADDRESSBOOK, addressbook-query
-//! (text-match on the named property), addressbook-multiget, and vCard validation.
+//! PUT does not validate iCalendar bodies. `validate_calendar_data` is a helper
+//! for applications, not applied on PUT.
+//!
+//! CardDAV support is a partial [RFC6352] implementation: MKADDRESSBOOK,
+//! addressbook-query (text-match on the named property), and addressbook-multiget.
+//! PUT does not validate vCard bodies; `validate_vcard_data` is an application helper.
 //!
 //! The litmus test suite also has tests for RFC3744 "acl" and "principal",
 //! RFC5842 "bind", and RFC3253 "versioning". Those we do not support right now.
@@ -117,12 +121,14 @@
 //! dav-server = { version = "0.12", features = ["caldav"] }
 //! ```
 //!
-//! This adds support for:
-//! - `MKCALENDAR` method for creating calendar collections
-//! - `REPORT` method for calendar queries (`calendar-query`, `calendar-multiget`)
-//! - CalDAV-specific properties and resource types
-//! - iCalendar data validation
-//! - Calendar-specific WebDAV extensions
+//! This adds a partial CalDAV implementation:
+//! - `MKCALENDAR` for calendar collections at `/calendars/<name>` (immediate children only)
+//! - `REPORT` subset: `calendar-query` (required `CALDAV:filter`, nested `comp-filter`,
+//!   `prop-filter`/`text-match`) and `calendar-multiget` (hrefs confined to the collection)
+//! - CalDAV-specific properties (`max-resource-size` 1MB) and resource types
+//!
+//! `free-busy-query` returns `501 Not Implemented`. PUT does not run
+//! `validate_calendar_data`; that helper is for applications.
 //!
 //! Enable `carddav` the same way for MKADDRESSBOOK, addressbook-query, and
 //! addressbook-multiget.

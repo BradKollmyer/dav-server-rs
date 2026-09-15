@@ -241,8 +241,7 @@ pub fn is_calendar_data(content: &[u8]) -> bool {
 /// Validate iCalendar data using the icalendar crate
 ///
 /// This function validates that the content is a well-formed iCalendar object.
-/// Use this function in your application layer to validate calendar data
-/// before or after writing to the filesystem.
+/// Use this helper in your application layer; it is not applied on PUT.
 ///
 /// # Example
 ///

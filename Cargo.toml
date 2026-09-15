@@ -23,7 +23,7 @@ actix-compat = [ "actix-web" ]
 warp-compat = [ "warp", "hyper" ]
 caldav = [ "icalendar" ]
 carddav = [ "calcard" ]
-# All web server implementations
+# Compat adapters plus CalDAV/CardDAV
 all = [ "actix-compat", "warp-compat", "caldav", "carddav" ]
 # Filesystems
 localfs = ["libc", "lru", "tokio/rt-multi-thread", "parking_lot", "reflink-copy"]

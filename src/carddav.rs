@@ -220,8 +220,7 @@ fn text_matches_core(value: &str, tm: &TextMatch) -> bool {
 /// Validate vCard data using the calcard crate
 ///
 /// This function validates that the content is a well-formed vCard.
-/// Use this function in your application layer to validate vCard data
-/// before or after writing to the filesystem.
+/// Use this helper in your application layer; it is not applied on PUT.
 ///
 /// # Example
 ///

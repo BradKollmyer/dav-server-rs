@@ -50,8 +50,8 @@ checks][README_litmus] of the Webdav Litmus Test testsuite. That's all of the ba
 - In most implementations "proppatch" is not needed. If you do need it then specify the "proppatch" feature, otherwise only specify the features you need. The "proppatch" feature is on by default.
 
 Optional [CalDAV][RFC4791] (`caldav` feature) and [CardDAV][RFC6352] (`carddav`
-feature) are also implemented. See [README.CalDAV.md](README.CalDAV.md) for
-CalDAV setup, queries, and limitations.
+feature) are partial implementations, not full RFC coverage. See
+[README.CalDAV.md](README.CalDAV.md) for CalDAV setup, queries, and limitations.
 
 The litmus test suite also has tests for RFC3744 "acl" and "principal",
 RFC5842 "bind", and RFC3253 "versioning". Those we do not support right now.

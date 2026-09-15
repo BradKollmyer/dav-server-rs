@@ -15,11 +15,10 @@ CalDAV is an extension of WebDAV that provides a standard way to access and mana
 
 The CalDAV implementation in dav-server includes:
 
-- **Calendar Collections**: A directory that functions as a calendar, containing one `.ics` file for each event.
+- **Calendar Collections**: Immediate children of `/calendars` (`/calendars/<name>`), each containing `.ics` files
 - **MKCALENDAR Method**: Create new calendar collection
-- **REPORT Method**: Query calendar data with filters
-- **CalDAV Properties**: Calendar-specific WebDAV properties
-- **iCalendar Support**: Parse and validate iCalendar data
+- **REPORT Method**: Implemented subset of `calendar-query` and `calendar-multiget` (see below)
+- **CalDAV Properties**: Calendar-specific WebDAV properties (`max-resource-size` is 1MB)
 - **Time Range Queries**: Filter events by date/time ranges
 - **Component Filtering**: Nested `comp-filter` by calendar component types (VEVENT, VTODO, etc.)
 - **Property Filtering**: `prop-filter` with optional `text-match` on property values
@@ -48,7 +47,7 @@ let server = DavHandler::builder()
 ```
 ## Important Setup Notes
 
-**CalDAV Directory Creation**: The `/calendars` directory (defined in `dav_server::caldav::DEFAULT_CALDAV_DIRECTORY`) must exist before CalDAV operations. `MemFs` and `LocalFs` create it automatically, but custom `GuardedFileSystem` implementations must initialize it during startup.
+**CalDAV Directory Creation**: The `/calendars` directory (defined in `dav_server::caldav::DEFAULT_CALDAV_DIRECTORY`) must exist before CalDAV operations. `MemFs` and `LocalFs` create it automatically, but custom `GuardedFileSystem` implementations must initialize it during startup. Calendar identity is `/calendars/<name>`: only immediate children of `/calendars` are calendar collections.
 
 ## CalDAV Methods
 
@@ -138,7 +137,7 @@ The implementation supports standard CalDAV properties:
 - `calendar-timezone`: Default timezone for the calendar
 - `supported-calendar-component-set`: Supported component types (VEVENT, VTODO, etc.)
 - `supported-calendar-data`: Supported calendar data formats
-- `max-resource-size`: Maximum size for calendar resources
+- `max-resource-size`: Maximum size for calendar resources (1MB)
 
 ### Principal Properties
 
@@ -151,7 +150,7 @@ The implementation supports standard CalDAV properties:
 
 ### Adding Events
 
-Store iCalendar data using PUT:
+Store iCalendar data using PUT. PUT does not validate ICS; `validate_calendar_data` is an application helper, not applied on PUT:
 
 ```bash
 curl -X PUT http://localhost:8080/calendars/my-calendar/event.ics \
@@ -190,6 +189,11 @@ The CalDAV implementation has been tested with:
 
 Current limitations include:
 
+- Partial RFC 4791 coverage: `calendar-query` / `calendar-multiget` are an implemented subset (nested `comp-filter`, `text-match`, required filter, href confinement)
+- `free-busy-query` returns `501 Not Implemented`
+- Calendar identity is `/calendars/<name>` (immediate children of `/calendars` only)
+- `max-resource-size` is 1MB
+- PUT does not validate iCalendar data (`validate_calendar_data` is an application helper)
 - No scheduling support (iTIP/iMIP)
 - Limited calendar-user-principal support
 - No calendar sharing or ACL support
@@ -255,7 +259,7 @@ cargo run --example caldav --features caldav
 
 ## Standards Compliance
 
-This implementation follows:
+This is a partial implementation of:
 
 - [RFC 4791](https://tools.ietf.org/html/rfc4791) - Calendaring Extensions to WebDAV (CalDAV)
 - [RFC 5545](https://tools.ietf.org/html/rfc5545) - Internet Calendaring and Scheduling Core Object Specification (iCalendar)
