@@ -343,6 +343,50 @@ END:VCALENDAR"
     }
 
     #[tokio::test]
+    async fn test_calendar_query_filters_by_summary_text_match() {
+        let server = setup_caldav_server2().await;
+        put_ics_data(
+            &server,
+            create_ics_data("meet-1", "Team Meeting"),
+            "/calendars/my-calendar/meeting.ics",
+        )
+        .await;
+        put_ics_data(
+            &server,
+            create_ics_data("appt-1", "Doctor Appointment"),
+            "/calendars/my-calendar/appointment.ics",
+        )
+        .await;
+
+        let summary_query = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT">
+        <C:prop-filter name="SUMMARY">
+          <C:text-match collation="i;unicode-casemap">meeting</C:text-match>
+        </C:prop-filter>
+      </C:comp-filter>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>"#;
+
+        let (status, body) = report_calendar_query(&server, summary_query).await;
+        assert_eq!(status, StatusCode::MULTI_STATUS);
+        assert!(
+            body.contains("Team Meeting"),
+            "SUMMARY text-match missing meeting: {body}"
+        );
+        assert!(
+            !body.contains("Doctor Appointment"),
+            "SUMMARY text-match must not return appointment: {body}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_calendar_query_without_filter_is_bad_request() {
         let server = setup_caldav_server2().await;
         put_ics_data(

@@ -1313,6 +1313,110 @@ mod if_state_token_tests {
     }
 }
 
+#[cfg(feature = "memfs")]
+mod fakels_tests {
+    use dav_server::{DavHandler, body::Body, fakels::FakeLs, memfs::MemFs};
+    use http::{Request, StatusCode};
+
+    const LOCKINFO: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<D:lockinfo xmlns:D="DAV:">
+  <D:lockscope><D:exclusive/></D:lockscope>
+  <D:locktype><D:write/></D:locktype>
+</D:lockinfo>"#;
+
+    fn setup() -> DavHandler {
+        DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .build_handler()
+    }
+
+    async fn put(server: &DavHandler, uri: &str, body: &str) -> StatusCode {
+        server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .status()
+    }
+
+    async fn lock(server: &DavHandler, uri: &str) -> (StatusCode, Option<String>) {
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("LOCK")
+                    .uri(uri)
+                    .header("Depth", "0")
+                    .header("Content-Type", "application/xml")
+                    .body(Body::from(LOCKINFO))
+                    .unwrap(),
+            )
+            .await;
+        let token = resp
+            .headers()
+            .get("lock-token")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        (resp.status(), token)
+    }
+
+    async fn unlock(server: &DavHandler, uri: &str, lock_token: &str) -> StatusCode {
+        server
+            .handle(
+                Request::builder()
+                    .method("UNLOCK")
+                    .uri(uri)
+                    .header("Lock-Token", lock_token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .status()
+    }
+
+    #[tokio::test]
+    async fn lock_and_unlock_always_succeed() {
+        let server = setup();
+        assert_eq!(put(&server, "/file.txt", "v1").await, StatusCode::CREATED);
+
+        let (status, token) = lock(&server, "/file.txt").await;
+        assert_eq!(status, StatusCode::OK);
+        let token = token.expect("Lock-Token header");
+        assert!(token.contains("opaquetoken:"), "{token}");
+
+        assert_eq!(
+            unlock(&server, "/file.txt", &token).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            unlock(&server, "/file.txt", "<opaquelocktoken:garbage>").await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn lock_does_not_block_put_or_second_exclusive_lock() {
+        let server = setup();
+        assert_eq!(put(&server, "/file.txt", "v1").await, StatusCode::CREATED);
+
+        let (status, _) = lock(&server, "/file.txt").await;
+        assert_eq!(status, StatusCode::OK);
+
+        assert_eq!(
+            put(&server, "/file.txt", "v2").await,
+            StatusCode::NO_CONTENT
+        );
+
+        let (status2, token2) = lock(&server, "/file.txt").await;
+        assert_eq!(status2, StatusCode::OK);
+        assert!(token2.is_some());
+    }
+}
+
 #[cfg(all(unix, feature = "localfs"))]
 mod localfs_symlink_jail_tests {
     use dav_server::davpath::DavPath;
