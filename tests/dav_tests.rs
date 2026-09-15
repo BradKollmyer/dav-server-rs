@@ -3785,3 +3785,105 @@ mod options_method_tests {
         assert!(!has(&a, "PROPFIND"), "{a}");
     }
 }
+
+#[cfg(feature = "memfs")]
+mod etag_compare_tests {
+    use dav_server::{DavHandler, body::Body, fakels::FakeLs, memfs::MemFs};
+    use http::{Request, StatusCode};
+
+    fn setup() -> DavHandler {
+        DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .build_handler()
+    }
+
+    // PUT a file and return the strong ETag the server reports for it.
+    async fn put_and_etag(server: &DavHandler, uri: &str) -> String {
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .body(Body::from("hello"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let etag = resp
+            .headers()
+            .get("etag")
+            .expect("PUT response has ETag")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
+        etag
+    }
+
+    // RFC 7232 3.2: If-None-Match uses the weak comparison function, so a
+    // weak tag whose opaque-tag matches the resource's strong ETag matches.
+    #[tokio::test]
+    async fn if_none_match_weak_tag_is_not_modified() {
+        let server = setup();
+        let etag = put_and_etag(&server, "/weak.txt").await;
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/weak.txt")
+                    .header("If-None-Match", format!("W/{etag}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+
+        // A different weak tag does not match.
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/weak.txt")
+                    .header("If-None-Match", r#"W/"nope""#)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // RFC 7232 3.1: If-Match uses the strong comparison function, so a weak
+    // tag never matches even when the opaque-tag is the same.
+    #[tokio::test]
+    async fn if_match_weak_tag_is_precondition_failed() {
+        let server = setup();
+        let etag = put_and_etag(&server, "/strong.txt").await;
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/strong.txt")
+                    .header("If-Match", format!("W/{etag}"))
+                    .body(Body::from("changed"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+
+        // The strong tag itself does match.
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/strong.txt")
+                    .header("If-Match", etag)
+                    .body(Body::from("changed"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+}

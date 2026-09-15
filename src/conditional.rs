@@ -30,22 +30,26 @@ pub(crate) fn ifrange_match(
             Some(date) => round_time(date) == round_time(*d),
             None => false,
         },
+        // RFC 7233 3.2: If-Range uses the strong comparison function.
         davheaders::IfRange::ETag(ref t) => match tag {
-            Some(tag) => t == tag,
+            Some(tag) => t.strong_eq(tag),
             None => false,
         },
     }
 }
 
+// `cmp` is the entity-tag comparison function to use: `ETag::strong_eq`
+// for If-Match (RFC 7232 3.1), `ETag::weak_eq` for If-None-Match (3.2).
 pub(crate) fn etaglist_match(
     tags: &davheaders::ETagList,
     exists: bool,
     tag: Option<&davheaders::ETag>,
+    cmp: fn(&ETag, &ETag) -> bool,
 ) -> bool {
     match *tags {
         davheaders::ETagList::Star => exists,
         davheaders::ETagList::Tags(ref t) => match tag {
-            Some(tag) => t.iter().any(|x| x == tag),
+            Some(tag) => t.iter().any(|x| cmp(x, tag)),
             None => false,
         },
     }
@@ -57,7 +61,7 @@ pub(crate) fn http_if_match(req: &Request, meta: Option<&dyn DavMetaData>) -> Op
 
     if let Some(r) = req.headers().typed_get::<davheaders::IfMatch>() {
         let etag = meta.and_then(ETag::from_meta);
-        if !etaglist_match(&r.0, meta.is_some(), etag.as_ref()) {
+        if !etaglist_match(&r.0, meta.is_some(), etag.as_ref(), ETag::strong_eq) {
             trace!("precondition fail: If-Match {r:?}");
             return Some(StatusCode::PRECONDITION_FAILED);
         }
@@ -75,7 +79,7 @@ pub(crate) fn http_if_match(req: &Request, meta: Option<&dyn DavMetaData>) -> Op
 
     if let Some(r) = req.headers().typed_get::<davheaders::IfNoneMatch>() {
         let etag = meta.and_then(ETag::from_meta);
-        if etaglist_match(&r.0, meta.is_some(), etag.as_ref()) {
+        if etaglist_match(&r.0, meta.is_some(), etag.as_ref(), ETag::weak_eq) {
             trace!("precondition fail: If-None-Match {r:?}");
             if req.method() == Method::GET || req.method() == Method::HEAD {
                 return Some(StatusCode::NOT_MODIFIED);
@@ -206,7 +210,7 @@ where
                             Ok(meta) => {
                                 // exists and may have metadata ..
                                 if let Some(mtag) = ETag::from_meta(meta.as_ref()) {
-                                    tag == &mtag
+                                    tag.strong_eq(&mtag)
                                 } else {
                                     false
                                 }

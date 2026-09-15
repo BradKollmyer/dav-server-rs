@@ -455,6 +455,8 @@ impl Header for Overwrite {
     }
 }
 
+/// An entity-tag (RFC 7232 2.3). `tag` holds the opaque-tag without the
+/// surrounding quotes or the `W/` weak indicator.
 #[derive(Debug, Clone)]
 pub struct ETag {
     tag: String,
@@ -468,25 +470,30 @@ impl ETag {
         if t.contains('\"') {
             Err(invalid())
         } else {
-            let w = if weak { "W/" } else { "" };
-            Ok(ETag {
-                tag: format!("{w}\"{t}\""),
-                weak,
-            })
+            Ok(ETag { tag: t, weak })
         }
     }
 
     pub fn from_meta(meta: &dyn DavMetaData) -> Option<ETag> {
         let tag = meta.etag()?;
-        Some(ETag {
-            tag: format!("\"{tag}\""),
-            weak: false,
-        })
+        Some(ETag { tag, weak: false })
     }
 
     #[allow(dead_code)]
     pub fn is_weak(&self) -> bool {
         self.weak
+    }
+
+    /// Strong comparison (RFC 7232 2.3.2): both tags must be strong and
+    /// their opaque-tags must match. Used for If-Match and If-Range.
+    pub fn strong_eq(&self, other: &ETag) -> bool {
+        !self.weak && !other.weak && self.tag == other.tag
+    }
+
+    /// Weak comparison (RFC 7232 2.3.2): the opaque-tags must match,
+    /// regardless of weakness. Used for If-None-Match.
+    pub fn weak_eq(&self, other: &ETag) -> bool {
+        self.tag == other.tag
     }
 }
 
@@ -505,13 +512,13 @@ impl FromStr for ETag {
             && !s[1..s.len() - 1].contains('\"')
         {
             Ok(ETag {
-                tag: t.to_owned(),
+                tag: s[1..s.len() - 1].to_owned(),
                 weak,
             })
-        } else if !t.is_empty() && !t.contains('\"') {
+        } else if !s.is_empty() && !s.contains('\"') {
             // allow more leniant if-match header
             Ok(ETag {
-                tag: format!("\"{t}\""),
+                tag: s.to_owned(),
                 weak,
             })
         } else {
@@ -531,13 +538,16 @@ impl TryFrom<&HeaderValue> for ETag {
 
 impl Display for ETag {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "\"{}\"", self.tag)
+        let w = if self.weak { "W/" } else { "" };
+        write!(f, "{w}\"{}\"", self.tag)
     }
 }
 
+// Equality is the strong comparison function; use `weak_eq` where
+// the weak comparison function applies (If-None-Match).
 impl PartialEq for ETag {
     fn eq(&self, other: &Self) -> bool {
-        !self.weak && !other.weak && self.tag == other.tag
+        self.strong_eq(other)
     }
 }
 
@@ -558,7 +568,9 @@ impl Header for ETag {
     where
         E: Extend<HeaderValue>,
     {
-        values.extend(std::iter::once(HeaderValue::from_str(&self.tag).unwrap()));
+        values.extend(std::iter::once(
+            HeaderValue::from_str(&self.to_string()).unwrap(),
+        ));
     }
 }
 
@@ -652,8 +664,8 @@ where
         ETagList::Star => "*".to_string(),
         ETagList::Tags(ref t) => t
             .iter()
-            .map(|t| t.tag.as_str())
-            .collect::<Vec<&str>>()
+            .map(|t| t.to_string())
+            .collect::<Vec<String>>()
             .join(", "),
     };
     values.extend(std::iter::once(HeaderValue::from_str(&value).unwrap()));
@@ -1037,6 +1049,47 @@ mod tests {
         assert!(t1 != t2);
         assert!(t2 != t3);
         assert!(t3 == t4);
+        assert!(t1.weak_eq(&t2));
+        assert!(!t2.weak_eq(&t3));
+    }
+
+    #[test]
+    fn etag_weak_and_strong_comparison() {
+        // RFC 7232 2.3.2 comparison table.
+        let weak = ETag::from_str(r#"W/"1""#).unwrap();
+        let weak2 = ETag::from_str(r#"W/"1""#).unwrap();
+        let strong = ETag::from_str(r#""1""#).unwrap();
+        let strong2 = ETag::from_str(r#""1""#).unwrap();
+        let other_weak = ETag::from_str(r#"W/"2""#).unwrap();
+
+        assert!(!weak.strong_eq(&weak2));
+        assert!(weak.weak_eq(&weak2));
+        assert!(!weak.strong_eq(&other_weak));
+        assert!(!weak.weak_eq(&other_weak));
+        assert!(!weak.strong_eq(&strong));
+        assert!(weak.weak_eq(&strong));
+        assert!(!strong.strong_eq(&weak));
+        assert!(strong.weak_eq(&weak));
+        assert!(strong.strong_eq(&strong2));
+        assert!(strong.weak_eq(&strong2));
+
+        assert!(weak.is_weak());
+        assert!(!strong.is_weak());
+        assert_eq!(weak.to_string(), r#"W/"1""#);
+        assert_eq!(strong.to_string(), r#""1""#);
+
+        let mut values = Vec::new();
+        weak.encode(&mut values);
+        assert_eq!(values, vec![HeaderValue::from_static(r#"W/"1""#)]);
+        let mut values = Vec::new();
+        IfNoneMatch(ETagList::Tags(vec![weak.clone(), strong.clone()])).encode(&mut values);
+        assert_eq!(values, vec![HeaderValue::from_static(r#"W/"1", "1""#)]);
+
+        // Lenient unquoted form still yields the same opaque-tag.
+        let lenient = ETag::from_str("W/1").unwrap();
+        assert!(lenient.is_weak());
+        assert!(lenient.weak_eq(&strong));
+        assert!(ETag::from_str("1").unwrap().strong_eq(&strong));
     }
 
     #[test]
@@ -1132,10 +1185,12 @@ mod tests {
     #[test]
     fn etag_empty_quoted_is_valid() {
         let strong = ETag::from_str("\"\"").unwrap();
-        assert_eq!(strong.tag, "\"\"");
+        assert_eq!(strong.tag, "");
         assert!(!strong.weak);
+        assert_eq!(strong.to_string(), "\"\"");
         let weak = ETag::from_str("W/\"\"").unwrap();
-        assert_eq!(weak.tag, "W/\"\"");
+        assert_eq!(weak.tag, "");
         assert!(weak.weak);
+        assert_eq!(weak.to_string(), "W/\"\"");
     }
 }
