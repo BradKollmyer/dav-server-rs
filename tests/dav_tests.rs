@@ -819,6 +819,145 @@ mod empty_xml_body_tests {
     }
 }
 
+#[cfg(feature = "memfs")]
+mod if_state_token_tests {
+    use dav_server::{DavHandler, body::Body, memfs::MemFs, memls::MemLs};
+    use http::{Request, StatusCode};
+
+    const LOCKINFO: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<D:lockinfo xmlns:D="DAV:">
+  <D:lockscope><D:exclusive/></D:lockscope>
+  <D:locktype><D:write/></D:locktype>
+</D:lockinfo>"#;
+
+    fn setup() -> DavHandler {
+        DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(MemLs::new())
+            .build_handler()
+    }
+
+    async fn put(
+        server: &DavHandler,
+        uri: &str,
+        body: &str,
+        if_header: Option<&str>,
+    ) -> StatusCode {
+        let mut builder = Request::builder().method("PUT").uri(uri);
+        if let Some(h) = if_header {
+            builder = builder.header("If", h);
+        }
+        let resp = server.handle(builder.body(Body::from(body)).unwrap()).await;
+        resp.status()
+    }
+
+    async fn lock(server: &DavHandler, uri: &str, depth: &str) -> (StatusCode, Option<String>) {
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("LOCK")
+                    .uri(uri)
+                    .header("Depth", depth)
+                    .header("Content-Type", "application/xml")
+                    .body(Body::from(LOCKINFO))
+                    .unwrap(),
+            )
+            .await;
+        let token = resp
+            .headers()
+            .get("lock-token")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        (resp.status(), token)
+    }
+
+    #[tokio::test]
+    async fn unlocked_garbage_token_is_precondition_failed() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/file.txt", "v1", None).await,
+            StatusCode::CREATED
+        );
+
+        assert_eq!(
+            put(
+                &server,
+                "/file.txt",
+                "v2",
+                Some("(<opaquelocktoken:garbage>)")
+            )
+            .await,
+            StatusCode::PRECONDITION_FAILED
+        );
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("LOCK")
+                    .uri("/file.txt")
+                    .header("If", "(<opaquelocktoken:garbage>)")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn unlocked_not_garbage_token_is_allowed() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/file.txt", "v1", None).await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            put(
+                &server,
+                "/file.txt",
+                "v2",
+                Some("(Not <opaquelocktoken:garbage>)")
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn live_lock_token_allows_put() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/file.txt", "v1", None).await,
+            StatusCode::CREATED
+        );
+
+        let (status, token) = lock(&server, "/file.txt", "0").await;
+        assert_eq!(status, StatusCode::OK);
+        let token = token.expect("Lock-Token header");
+
+        assert_eq!(
+            put(&server, "/file.txt", "v2", Some(&format!("({token})"))).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn depth_zero_lock_does_not_cover_child() {
+        let server = setup();
+        let (status, token) = lock(&server, "/", "0").await;
+        assert_eq!(status, StatusCode::OK);
+        let token = token.expect("Lock-Token header");
+
+        assert_eq!(
+            put(&server, "/child.txt", "hello", Some(&format!("({token})"))).await,
+            StatusCode::PRECONDITION_FAILED
+        );
+        assert_eq!(
+            put(&server, "/child.txt", "hello", None).await,
+            StatusCode::CREATED
+        );
+    }
+}
+
 #[cfg(all(unix, feature = "localfs"))]
 mod localfs_symlink_jail_tests {
     use dav_server::davpath::DavPath;

@@ -6,7 +6,7 @@ use http::{Method, StatusCode};
 use crate::davheaders::{self, ETag};
 use crate::davpath::DavPath;
 use crate::fs::{DavMetaData, GuardedFileSystem};
-use crate::ls::DavLockSystem;
+use crate::ls::{DavLock, DavLockSystem};
 
 type Request = http::Request<()>;
 
@@ -94,6 +94,34 @@ pub(crate) fn http_if_match(req: &Request, meta: Option<&dyn DavMetaData>) -> Op
     None
 }
 
+// Strip a trailing slash so /dir and /dir/ compare equal. Keep "/" as-is.
+fn davpath_key(path: &DavPath) -> &[u8] {
+    let b = path.as_bytes();
+    if b.len() > 1 && b.ends_with(b"/") {
+        &b[..b.len() - 1]
+    } else {
+        b
+    }
+}
+
+// A token is true only if it identifies a lock that currently applies to the
+// tagged resource (RFC4918 10.4.4). MemLs::discover also yields Depth:0
+// ancestor locks, which do not cover descendants.
+fn lock_covers_path(lock: &DavLock, path: &DavPath) -> bool {
+    let lock_key = davpath_key(lock.path.as_ref());
+    let path_key = davpath_key(path);
+    if lock_key == path_key {
+        return true;
+    }
+    if !lock.deep {
+        return false;
+    }
+    if lock_key == b"/" {
+        return true;
+    }
+    path_key.starts_with(lock_key) && path_key.get(lock_key.len()) == Some(&b'/')
+}
+
 // handle the If header: RFC4918, 10.4.  If Header
 //
 // returns true if the header was not present, or if any of the iflists
@@ -159,10 +187,11 @@ where
                         false
                     } else {
                         match *ls {
-                            Some(ref ls) => {
-                                let tokens: Vec<String> = vec![s.to_owned()];
-                                ls.check(p, None, true, false, &tokens).await.is_ok()
-                            }
+                            Some(ref ls) => ls
+                                .discover(p)
+                                .await
+                                .iter()
+                                .any(|lock| lock.token == *s && lock_covers_path(lock, p)),
                             None => false,
                         }
                     }
@@ -242,5 +271,105 @@ where
     match dav_if_match(req, fs, ls, path, credentials).await {
         (true, v) => Ok(v),
         (false, _) => Err(StatusCode::PRECONDITION_FAILED),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memls::MemLs;
+    use crate::voidfs::VoidFs;
+
+    fn req_if(uri: &str, if_header: &str) -> Request {
+        http::Request::builder()
+            .method("PUT")
+            .uri(uri)
+            .header("If", if_header)
+            .body(())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn garbage_token_on_unlocked_resource_is_false() {
+        let fs = VoidFs::<()>::new();
+        let ls: Option<Box<dyn DavLockSystem>> = Some(MemLs::new());
+        let path = DavPath::new("/file").unwrap();
+        let req = req_if("/file", "(<opaquelocktoken:garbage>)");
+        let (ok, tokens) = dav_if_match(&req, fs.as_ref(), &ls, &path, &()).await;
+        assert!(!ok);
+        assert_eq!(tokens, vec!["opaquelocktoken:garbage".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn not_garbage_token_on_unlocked_resource_is_true() {
+        let fs = VoidFs::<()>::new();
+        let ls: Option<Box<dyn DavLockSystem>> = Some(MemLs::new());
+        let path = DavPath::new("/file").unwrap();
+        let req = req_if("/file", "(Not <opaquelocktoken:garbage>)");
+        let (ok, tokens) = dav_if_match(&req, fs.as_ref(), &ls, &path, &()).await;
+        assert!(ok);
+        assert_eq!(tokens, vec!["opaquelocktoken:garbage".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn live_lock_token_matches_locked_resource() {
+        let fs = VoidFs::<()>::new();
+        let ls: Option<Box<dyn DavLockSystem>> = Some(MemLs::new());
+        let path = DavPath::new("/file").unwrap();
+        let lock = ls
+            .as_ref()
+            .unwrap()
+            .lock(&path, None, None, None, false, false)
+            .await
+            .unwrap();
+        let req = req_if("/file", &format!("(<{}>)", lock.token));
+        let (ok, tokens) = dav_if_match(&req, fs.as_ref(), &ls, &path, &()).await;
+        assert!(ok);
+        assert_eq!(tokens, vec![lock.token]);
+    }
+
+    #[tokio::test]
+    async fn depth_zero_lock_does_not_cover_child() {
+        let fs = VoidFs::<()>::new();
+        let ls: Option<Box<dyn DavLockSystem>> = Some(MemLs::new());
+        let root = DavPath::new("/").unwrap();
+        let child = DavPath::new("/child").unwrap();
+        let lock = ls
+            .as_ref()
+            .unwrap()
+            .lock(&root, None, None, None, false, false)
+            .await
+            .unwrap();
+        let req = req_if("/child", &format!("(<{}>)", lock.token));
+        let (ok, _) = dav_if_match(&req, fs.as_ref(), &ls, &child, &()).await;
+        assert!(!ok);
+    }
+
+    #[tokio::test]
+    async fn deep_lock_covers_child() {
+        let fs = VoidFs::<()>::new();
+        let ls: Option<Box<dyn DavLockSystem>> = Some(MemLs::new());
+        let root = DavPath::new("/").unwrap();
+        let child = DavPath::new("/child").unwrap();
+        let lock = ls
+            .as_ref()
+            .unwrap()
+            .lock(&root, None, None, None, false, true)
+            .await
+            .unwrap();
+        let req = req_if("/child", &format!("(<{}>)", lock.token));
+        let (ok, _) = dav_if_match(&req, fs.as_ref(), &ls, &child, &()).await;
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn dav_namespace_token_is_false() {
+        let fs = VoidFs::<()>::new();
+        let ls: Option<Box<dyn DavLockSystem>> = Some(MemLs::new());
+        let path = DavPath::new("/file").unwrap();
+        let req = req_if("/file", "(<DAV:no-lock>)");
+        let (ok, tokens) = dav_if_match(&req, fs.as_ref(), &ls, &path, &()).await;
+        assert!(!ok);
+        assert_eq!(tokens, vec!["DAV:no-lock".to_string()]);
     }
 }
