@@ -307,6 +307,7 @@ impl DavPath {
     /// True if this path is inside `collection` (not the collection itself).
     ///
     /// Compares prefix-stripped bytes with `collection` as a directory prefix.
+    #[cfg(any(feature = "caldav", feature = "carddav"))]
     pub(crate) fn is_in_collection(&self, collection: &DavPath) -> bool {
         let href = self.as_bytes();
         let mut prefix = collection.as_bytes().to_vec();
