@@ -162,6 +162,22 @@ pub(crate) fn is_addressbook_type_marker(prop: &DavProp) -> bool {
     prop.name == "addressbook" && prop.namespace.as_deref() == Some(crate::carddav::NS_CARDDAV_URI)
 }
 
+/// True if `prop` is a CalDAV/CardDAV collection type marker. Clients may
+/// neither set, remove nor see it as a dead property; it is only ever
+/// changed through `mark_calendar` / `mark_addressbook`.
+#[cfg(any(feature = "caldav", feature = "carddav"))]
+pub(crate) fn is_protected_type_marker(prop: &DavProp) -> bool {
+    #[cfg(feature = "caldav")]
+    if is_calendar_type_marker(prop) {
+        return true;
+    }
+    #[cfg(feature = "carddav")]
+    if is_addressbook_type_marker(prop) {
+        return true;
+    }
+    false
+}
+
 /// True if metadata or a stored CalDAV marker property says this is a calendar.
 #[cfg(feature = "caldav")]
 pub(crate) async fn meta_or_prop_is_calendar<C>(

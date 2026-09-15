@@ -1984,6 +1984,150 @@ END:VCALENDAR"#
             "calendar-query must return the whole object: {body_str}"
         );
     }
+
+    #[cfg(feature = "proppatch")]
+    async fn mkcalendar_on_dead_prop_fs() -> DavHandler {
+        let server = DavHandler::builder()
+            .filesystem(DeadPropCalFs::new())
+            .locksystem(FakeLs::new())
+            .build_handler();
+        mkcol(&server, "/calendars").await;
+        let req = Request::builder()
+            .method("MKCALENDAR")
+            .uri("/calendars/prop-cal")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        server
+    }
+
+    #[cfg(feature = "proppatch")]
+    async fn proppatch(server: &DavHandler, uri: &str, body: &str) -> String {
+        let req = Request::builder()
+            .method("PROPPATCH")
+            .uri(uri)
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS, "PROPPATCH {uri}");
+        resp_to_string(resp).await
+    }
+
+    #[cfg(feature = "proppatch")]
+    async fn propfind_resourcetype(server: &DavHandler, uri: &str) -> String {
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:resourcetype/>
+  </D:prop>
+</D:propfind>"#;
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri(uri)
+            .header("Depth", "0")
+            .body(Body::from(propfind_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS, "PROPFIND {uri}");
+        resp_to_string(resp).await
+    }
+
+    #[cfg(feature = "proppatch")]
+    const PROPPATCH_SET_MARKER: &str = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:set>
+    <D:prop>
+      <C:calendar/>
+    </D:prop>
+  </D:set>
+</D:propertyupdate>"#;
+
+    #[cfg(feature = "proppatch")]
+    const PROPPATCH_REMOVE_MARKER: &str = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:remove>
+    <D:prop>
+      <C:calendar/>
+    </D:prop>
+  </D:remove>
+</D:propertyupdate>"#;
+
+    /// PROPPATCH must not be able to plant the calendar type marker on a
+    /// plain collection and thereby turn it into a calendar.
+    #[cfg(feature = "proppatch")]
+    #[tokio::test]
+    async fn test_proppatch_cannot_set_calendar_type_marker() {
+        let server = setup_caldav_server().await;
+        mkcol(&server, "/calendars/plain").await;
+
+        let body_str = proppatch(&server, "/calendars/plain", PROPPATCH_SET_MARKER).await;
+        assert!(
+            body_str.contains("HTTP/1.1 403"),
+            "setting the type marker must be forbidden: {body_str}"
+        );
+
+        let body_str = propfind_resourcetype(&server, "/calendars/plain").await;
+        assert!(
+            body_str.contains("<D:collection"),
+            "missing D:collection: {body_str}"
+        );
+        assert!(
+            !body_str.contains("<C:calendar"),
+            "plain collection must not have become a calendar: {body_str}"
+        );
+    }
+
+    /// PROPPATCH must not be able to remove the marker that makes a
+    /// collection a calendar on a filesystem that stores it as a dead prop.
+    #[cfg(feature = "proppatch")]
+    #[tokio::test]
+    async fn test_proppatch_cannot_remove_calendar_type_marker() {
+        let server = mkcalendar_on_dead_prop_fs().await;
+
+        let body_str = proppatch(&server, "/calendars/prop-cal", PROPPATCH_REMOVE_MARKER).await;
+        assert!(
+            body_str.contains("HTTP/1.1 403"),
+            "removing the type marker must be forbidden: {body_str}"
+        );
+
+        let body_str = propfind_resourcetype(&server, "/calendars/prop-cal").await;
+        assert!(
+            body_str.contains("<C:calendar"),
+            "calendar must still be a calendar: {body_str}"
+        );
+    }
+
+    /// The stored type marker is an implementation detail: PROPFIND allprop
+    /// must only report it inside DAV:resourcetype, not as a dead property.
+    #[cfg(feature = "proppatch")]
+    #[tokio::test]
+    async fn test_propfind_allprop_hides_calendar_type_marker() {
+        let server = mkcalendar_on_dead_prop_fs().await;
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/calendars/prop-cal")
+            .header("Depth", "0")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+
+        let resourcetype_end = body_str
+            .find("</D:resourcetype>")
+            .unwrap_or_else(|| panic!("missing resourcetype: {body_str}"));
+        assert!(
+            body_str[..resourcetype_end].contains("<C:calendar"),
+            "resourcetype must contain C:calendar: {body_str}"
+        );
+        assert_eq!(
+            body_str.matches("<C:calendar").count(),
+            1,
+            "type marker leaked as a dead property: {body_str}"
+        );
+    }
 }
 
 #[cfg(all(not(feature = "caldav"), feature = "memfs"))]

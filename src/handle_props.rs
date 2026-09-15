@@ -459,6 +459,10 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     // as a dead property, e.g. DAV:displayname).
     #[cfg(feature = "proppatch")]
     fn liveprop_set(&self, prop: &Element, can_deadprop: bool) -> StatusCode {
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        if is_protected_type_marker(&element_to_davprop(prop)) {
+            return StatusCode::FORBIDDEN;
+        }
         match prop.namespace.as_deref() {
             Some(NS_DAV_URI) => {
                 match prop.name.as_str() {
@@ -535,6 +539,10 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     // exception of getcontentlanguage and displayname.
     #[cfg(feature = "proppatch")]
     fn liveprop_remove(&self, prop: &Element, can_deadprop: bool) -> StatusCode {
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        if is_protected_type_marker(&element_to_davprop(prop)) {
+            return StatusCode::FORBIDDEN;
+        }
         match prop.namespace.as_deref() {
             Some(NS_DAV_URI) => match prop.name.as_str() {
                 "getcontentlanguage" | "displayname" => {
@@ -720,7 +728,8 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     }
 
     /// Apply DAV:set / DAV:prop children as dead properties (PROPPATCH path).
-    /// `resourcetype` is applied via mark_calendar / mark_addressbook, not as a dead prop.
+    /// `resourcetype` is applied via mark_calendar / mark_addressbook, not as a
+    /// dead prop, and the collection type markers are ignored for the same reason.
     #[cfg(feature = "proppatch")]
     pub(crate) async fn apply_set_props(&self, path: &DavPath, tree: &Element) -> DavResult<()> {
         let can_deadprop = self.fs.have_props(path, &self.credentials).await;
@@ -728,7 +737,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             return Ok(());
         }
 
-        let props: Vec<&Element> = tree
+        let props = tree
             .child_elems_iter()
             .filter(|elem| elem.name == "set")
             .flat_map(|elem| {
@@ -736,8 +745,10 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     .filter(|e| e.name == "prop")
                     .flat_map(|e| e.child_elems_iter())
             })
-            .filter(|n| n.name != "resourcetype")
-            .collect();
+            .filter(|n| n.name != "resourcetype");
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        let props = props.filter(|n| !is_protected_type_marker(&element_to_davprop(n)));
+        let props: Vec<&Element> = props.collect();
 
         let mut patch = Vec::new();
         for n in props {
@@ -1312,6 +1323,8 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
             }
         }
 
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        let try_deadprop = try_deadprop && !is_protected_type_marker(&element_to_davprop(prop));
         if try_deadprop && self.name == "prop" && self.fs.have_props(path, &self.credentials).await
         {
             // asking for a specific property.
@@ -1367,8 +1380,10 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
             && self.fs.have_props(path, &self.credentials).await
             && let Ok(v) = self.fs.get_props(path, do_content, &self.credentials).await
         {
-            v.into_iter()
-                .map(davprop_to_element)
+            let v = v.into_iter();
+            #[cfg(any(feature = "caldav", feature = "carddav"))]
+            let v = v.filter(|p| !is_protected_type_marker(p));
+            v.map(davprop_to_element)
                 .for_each(|e| add_sc_elem(&mut props, StatusCode::OK, e));
         }
 
