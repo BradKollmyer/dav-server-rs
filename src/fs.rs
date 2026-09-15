@@ -82,15 +82,13 @@ impl From<&std::io::Error> for FsError {
                 libc::EXDEV => return FsError::IsRemote,
                 _ => {}
             }
-        } else {
-            // not an OS error - must be "not implemented"
-            // (e.g. metadata().created() on systems without st_crtime)
-            return FsError::NotImplemented;
         }
-        // generic mappings for-whatever is left.
+        // generic mappings for leftover OS errors and errors with no OS code.
         match e.kind() {
             ErrorKind::NotFound => FsError::NotFound,
             ErrorKind::PermissionDenied => FsError::Forbidden,
+            ErrorKind::Unsupported => FsError::NotImplemented,
+            ErrorKind::InvalidInput => FsError::GeneralFailure,
             _ => FsError::GeneralFailure,
         }
     }
@@ -884,5 +882,18 @@ impl std::error::Error for FsError {
 impl std::fmt::Display for FsError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{self:?}")
+    }
+}
+
+#[cfg(all(test, any(feature = "memfs", feature = "localfs")))]
+mod tests {
+    use super::*;
+    use std::io::{self, ErrorKind};
+
+    #[test]
+    fn invalid_input_io_error_is_not_not_implemented() {
+        let err = FsError::from(&io::Error::new(ErrorKind::InvalidInput, "invalid seek"));
+        assert_ne!(err, FsError::NotImplemented);
+        assert_eq!(err, FsError::GeneralFailure);
     }
 }
