@@ -7,7 +7,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::ErrorKind;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,6 +16,8 @@ use lru::LruCache;
 use parking_lot::Mutex;
 
 use crate::davpath::DavPath;
+use crate::fs::{FsError, FsResult};
+use crate::localfs::{join_confined, push_normal_component};
 
 const CACHE_ENTRIES: usize = 4096;
 const CACHE_MAX_AGE: u64 = 15 * 60;
@@ -24,21 +26,20 @@ const CACHE_SLEEP_MS: u64 = 30059;
 static CACHE: LazyLock<Cache> = LazyLock::new(|| Cache::new(CACHE_ENTRIES));
 
 // Do a case-insensitive path lookup.
-pub(crate) fn resolve(base: impl Into<PathBuf>, path: &DavPath) -> PathBuf {
+pub(crate) fn resolve(base: impl Into<PathBuf>, path: &DavPath) -> FsResult<PathBuf> {
     let base = base.into();
-    let path = path.as_rel_ospath();
+    let rel = path.as_rel_ospath();
 
-    // must be rooted, and valid UTF-8.
-    let mut fullpath = base.clone();
-    fullpath.push(path);
+    // Join only Normal components so a drive/UNC/absolute DavPath cannot replace `base`.
+    let fullpath = join_confined(&base, path)?;
     if !fullpath.has_root() || fullpath.to_str().is_none() {
-        return fullpath;
+        return Ok(fullpath);
     }
 
     // must have a parent.
     let parent = match fullpath.parent() {
         Some(p) => p,
-        None => return fullpath,
+        None => return Ok(fullpath),
     };
 
     // deref in advance: first LazyLock, then Arc.
@@ -46,18 +47,24 @@ pub(crate) fn resolve(base: impl Into<PathBuf>, path: &DavPath) -> PathBuf {
 
     // In the cache?
     if let Some((path, _)) = cache.get(&fullpath) {
-        return path;
+        return Ok(path);
     }
 
     // if the file exists, fine.
     if fullpath.metadata().is_ok() {
-        return fullpath;
+        return Ok(fullpath);
     }
 
     // we need the path as a list of segments.
-    let segs = path.iter().collect::<Vec<_>>();
+    let segs = rel
+        .components()
+        .map(|c| match c {
+            Component::Normal(s) => Ok(s),
+            _ => Err(FsError::Forbidden),
+        })
+        .collect::<FsResult<Vec<_>>>()?;
     if segs.is_empty() {
-        return fullpath;
+        return Ok(fullpath);
     }
 
     // if the parent exists, do a lookup there straight away
@@ -77,11 +84,11 @@ pub(crate) fn resolve(base: impl Into<PathBuf>, path: &DavPath) -> PathBuf {
         (parent.to_path_buf(), true)
     };
     if parent_exists {
-        let (newpath, stop) = lookup(parent, segs[segs.len() - 1], true);
+        let (newpath, stop) = lookup(parent, segs[segs.len() - 1], true)?;
         if !stop {
             cache.insert(&newpath);
         }
-        return newpath;
+        return Ok(newpath);
     }
 
     // start from the root, then add segments one by one.
@@ -94,31 +101,31 @@ pub(crate) fn resolve(base: impl Into<PathBuf>, path: &DavPath) -> PathBuf {
                 // Save the path leading up to this file or dir.
                 cache.insert(&newpath);
             }
-            let (n, s) = lookup(newpath, seg, false);
+            let (n, s) = lookup(newpath, seg, false)?;
             newpath = n;
             stop = s;
         } else {
-            newpath.push(seg);
+            push_normal_component(&mut newpath, seg)?;
         }
     }
     if !stop {
         // resolved succesfully. save in cache.
         cache.insert(&newpath);
     }
-    newpath
+    Ok(newpath)
 }
 
 // lookup a filename in a directory in a case insensitive way.
-fn lookup(mut path: PathBuf, seg: &OsStr, no_init_check: bool) -> (PathBuf, bool) {
+fn lookup(mut path: PathBuf, seg: &OsStr, no_init_check: bool) -> FsResult<(PathBuf, bool)> {
     // does it exist as-is?
     let mut path2 = path.clone();
-    path2.push(seg);
+    push_normal_component(&mut path2, seg)?;
     if !no_init_check {
         match path2.metadata() {
-            Ok(_) => return (path2, false),
+            Ok(_) => return Ok((path2, false)),
             Err(ref e) if e.kind() != ErrorKind::NotFound => {
                 // stop on errors other than "NotFound".
-                return (path2, true);
+                return Ok((path2, true));
             }
             Err(_) => {}
         }
@@ -127,13 +134,13 @@ fn lookup(mut path: PathBuf, seg: &OsStr, no_init_check: bool) -> (PathBuf, bool
     // first, lowercase filename.
     let filename = match seg.to_str() {
         Some(s) => s.to_lowercase(),
-        None => return (path2, true),
+        None => return Ok((path2, true)),
     };
 
     // we have to read the entire directory.
     let dir = match path.read_dir() {
         Ok(dir) => dir,
-        Err(_) => return (path2, true),
+        Err(_) => return Ok((path2, true)),
     };
     for entry in dir.into_iter() {
         let entry = match entry {
@@ -146,11 +153,13 @@ fn lookup(mut path: PathBuf, seg: &OsStr, no_init_check: bool) -> (PathBuf, bool
             None => continue,
         };
         if name.to_lowercase() == filename {
-            path.push(name);
-            return (path, false);
+            if push_normal_component(&mut path, &entry_name).is_err() {
+                continue;
+            }
+            return Ok((path, false));
         }
     }
-    (path2, true)
+    Ok((path2, true))
 }
 
 // The cache stores a mapping of lowercased path -> actual path.

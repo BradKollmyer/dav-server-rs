@@ -6,6 +6,7 @@
 
 use std::any::Any;
 use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::future::{self, Future};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::mem;
@@ -22,7 +23,7 @@ use std::os::unix::{
 use std::os::windows::fs::FileTimesExt;
 #[cfg(target_os = "windows")]
 use std::os::windows::prelude::*;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::pin::pin;
 use std::sync::Arc;
@@ -140,6 +141,39 @@ struct LocalFsDirEntry {
     entry: std::fs::DirEntry,
 }
 
+/// Append a single Normal path component.
+///
+/// `PathBuf::push` re-parses its argument, so a name like `C:` or `\foo` would
+/// replace `basedir` on Windows. Only a standalone `Component::Normal` is safe.
+pub(crate) fn push_normal_component(path: &mut PathBuf, name: &OsStr) -> FsResult<()> {
+    let mut comps = Path::new(name).components();
+    match (comps.next(), comps.next()) {
+        (Some(Component::Normal(n)), None) => {
+            path.push(n);
+            Ok(())
+        }
+        _ => Err(FsError::Forbidden),
+    }
+}
+
+/// Join `rel` onto `basedir` component-by-component.
+///
+/// Prefix, root, `.`, and `..` are forbidden so a DavPath cannot escape the share.
+pub(crate) fn join_rel_path(basedir: &Path, rel: &Path) -> FsResult<PathBuf> {
+    let mut out = basedir.to_path_buf();
+    for component in rel.components() {
+        match component {
+            Component::Normal(seg) => push_normal_component(&mut out, seg)?,
+            _ => return Err(FsError::Forbidden),
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn join_confined(basedir: &Path, path: &DavPath) -> FsResult<PathBuf> {
+    join_rel_path(basedir, path.as_rel_ospath())
+}
+
 impl LocalFs {
     /// Create a new LocalFs DavFileSystem, serving "base".
     ///
@@ -238,15 +272,14 @@ impl LocalFs {
         pathbuf
     }
 
-    fn fspath(&self, path: &DavPath) -> PathBuf {
+    fn fspath(&self, path: &DavPath) -> FsResult<PathBuf> {
+        if self.inner.is_file {
+            return Ok(self.inner.basedir.clone());
+        }
         if self.inner.case_insensitive {
             crate::localfs_windows::resolve(&self.inner.basedir, path)
         } else {
-            let mut pathbuf = self.inner.basedir.clone();
-            if !self.inner.is_file {
-                pathbuf.push(path.as_rel_ospath());
-            }
-            pathbuf
+            join_confined(&self.inner.basedir, path)
         }
     }
 
@@ -274,7 +307,7 @@ impl DavFileSystem for LocalFs {
             if let Some(meta) = self.is_virtual(davpath) {
                 return Ok(meta);
             }
-            let path = self.fspath(davpath);
+            let path = self.fspath(davpath)?;
             if self.is_notfound(&path) {
                 return Err(FsError::NotFound);
             }
@@ -292,7 +325,7 @@ impl DavFileSystem for LocalFs {
             if let Some(meta) = self.is_virtual(davpath) {
                 return Ok(meta);
             }
-            let path = self.fspath(davpath);
+            let path = self.fspath(davpath)?;
             if self.is_notfound(&path) {
                 return Err(FsError::NotFound);
             }
@@ -314,7 +347,7 @@ impl DavFileSystem for LocalFs {
     ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
         async move {
             trace!("FS: read_dir {:?}", self.fspath_dbg(davpath));
-            let path = self.fspath(davpath);
+            let path = self.fspath(davpath)?;
             let path2 = path.clone();
             let iter = self.blocking(move || std::fs::read_dir(&path)).await;
             match iter {
@@ -347,7 +380,7 @@ impl DavFileSystem for LocalFs {
             }
             #[cfg(unix)]
             let mode = if self.inner.public { 0o666 } else { 0o600 };
-            let path = self.fspath(path);
+            let path = self.fspath(path)?;
             self.blocking(move || {
                 #[cfg(unix)]
                 let res = std::fs::OpenOptions::new()
@@ -389,7 +422,7 @@ impl DavFileSystem for LocalFs {
             }
             #[cfg(unix)]
             let mode = if self.inner.public { 0o777 } else { 0o700 };
-            let path = self.fspath(path);
+            let path = self.fspath(path)?;
             self.blocking(move || {
                 #[cfg(unix)]
                 {
@@ -413,7 +446,7 @@ impl DavFileSystem for LocalFs {
     fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
             trace!("FS: remove_dir {:?}", self.fspath_dbg(path));
-            let path = self.fspath(path);
+            let path = self.fspath(path)?;
             self.blocking(move || std::fs::remove_dir(path).map_err(|e| e.into()))
                 .await
         }
@@ -426,7 +459,7 @@ impl DavFileSystem for LocalFs {
             if self.is_forbidden(path) {
                 return Err(FsError::Forbidden);
             }
-            let path = self.fspath(path);
+            let path = self.fspath(path)?;
             self.blocking(move || std::fs::remove_file(path).map_err(|e| e.into()))
                 .await
         }
@@ -443,8 +476,8 @@ impl DavFileSystem for LocalFs {
             if self.is_forbidden(from) || self.is_forbidden(to) {
                 return Err(FsError::Forbidden);
             }
-            let frompath = self.fspath(from);
-            let topath = self.fspath(to);
+            let frompath = self.fspath(from)?;
+            let topath = self.fspath(to)?;
             self.blocking(move || {
                 match std::fs::rename(&frompath, &topath) {
                     Ok(v) => Ok(v),
@@ -477,8 +510,8 @@ impl DavFileSystem for LocalFs {
             if self.is_forbidden(from) || self.is_forbidden(to) {
                 return Err(FsError::Forbidden);
             }
-            let path_from = self.fspath(from);
-            let path_to = self.fspath(to);
+            let path_from = self.fspath(from)?;
+            let path_to = self.fspath(to)?;
 
             match self
                 .blocking(move || reflink_or_copy(path_from, path_to))
@@ -505,7 +538,7 @@ impl DavFileSystem for LocalFs {
             if self.is_forbidden(davpath) {
                 return Err(FsError::Forbidden);
             }
-            let path = self.fspath(davpath);
+            let path = self.fspath(davpath)?;
             self.blocking(move || {
                 open_for_times(&path)?
                     .set_modified(tm)
@@ -529,7 +562,7 @@ impl DavFileSystem for LocalFs {
                 if self.is_forbidden(davpath) {
                     return Err(FsError::Forbidden);
                 }
-                let path = self.fspath(davpath);
+                let path = self.fspath(davpath)?;
                 self.blocking(move || {
                     let file = open_for_times(&path)?;
                     let times = std::fs::FileTimes::new().set_created(tm);
@@ -918,5 +951,84 @@ impl DavMetaData for LocalFsMetaData {
         } else {
             Some(format!("{:x}", t))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn join_normal_relative_segments() {
+        let base = PathBuf::from("share");
+        let out = join_rel_path(&base, Path::new("foo/bar")).unwrap();
+        assert_eq!(out, PathBuf::from("share").join("foo").join("bar"));
+
+        let fs = LocalFs::new(&base, false, false, false);
+        let path = DavPath::new("/foo/bar").unwrap();
+        assert_eq!(
+            fs.fspath(&path).unwrap(),
+            PathBuf::from("share").join("foo").join("bar")
+        );
+    }
+
+    #[test]
+    fn join_rejects_parent_cur_and_root() {
+        let base = PathBuf::from("share");
+        assert_eq!(
+            join_rel_path(&base, Path::new("foo/../etc")),
+            Err(FsError::Forbidden)
+        );
+        assert_eq!(
+            join_rel_path(&base, Path::new("./foo")),
+            Err(FsError::Forbidden)
+        );
+        assert_eq!(
+            join_rel_path(&base, Path::new("/etc/passwd")),
+            Err(FsError::Forbidden)
+        );
+    }
+
+    #[test]
+    fn join_rejects_names_that_push_would_treat_as_absolute() {
+        let base = PathBuf::from("share");
+        assert_eq!(
+            push_normal_component(&mut base.clone(), OsStr::new("..")),
+            Err(FsError::Forbidden)
+        );
+        assert_eq!(
+            push_normal_component(&mut base.clone(), OsStr::new(".")),
+            Err(FsError::Forbidden)
+        );
+        assert_eq!(
+            push_normal_component(&mut base.clone(), OsStr::new("/etc")),
+            Err(FsError::Forbidden)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn join_rejects_windows_drive_and_unc() {
+        let base = PathBuf::from(r"C:\share");
+        assert_eq!(
+            join_rel_path(&base, Path::new("C:/Windows/win.ini")),
+            Err(FsError::Forbidden)
+        );
+        assert_eq!(
+            join_rel_path(&base, Path::new(r"\Windows\win.ini")),
+            Err(FsError::Forbidden)
+        );
+        assert_eq!(
+            join_rel_path(&base, Path::new(r"\\server\share\file")),
+            Err(FsError::Forbidden)
+        );
+        assert_eq!(
+            push_normal_component(&mut base.clone(), OsStr::new("C:")),
+            Err(FsError::Forbidden)
+        );
+
+        let fs = LocalFs::new(&base, false, false, false);
+        let path = DavPath::new("/C:/Windows/win.ini").unwrap();
+        assert_eq!(fs.fspath(&path), Err(FsError::Forbidden));
     }
 }
