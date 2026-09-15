@@ -4,6 +4,9 @@
 //  Listens on localhost:4918, plain http, no ssl.
 //  Connect to http://localhost:4918/
 //
+//  `--auth` is **not authentication**: it only requires a Basic header so
+//  litmus can send credentials. Any username and password are accepted.
+//
 
 use std::{convert::Infallible, error::Error, net::SocketAddr};
 
@@ -47,11 +50,12 @@ impl Server {
         req: hyper::Request<hyper::body::Incoming>,
     ) -> Result<hyper::Response<Body>, Infallible> {
         let user = if self.auth {
-            // we want the client to authenticate.
+            // This is **not authentication**. Any username and password are
+            // accepted; the header is only required so litmus can send Basic.
             match req.headers().typed_get::<Authorization<Basic>>() {
                 Some(Authorization(basic)) => Some(basic.username().to_string()),
                 None => {
-                    // return a 401 reply.
+                    // 401 means "send a Basic header", not a failed login.
                     let response = hyper::Response::builder()
                         .status(401)
                         .header("WWW-Authenticate", "Basic realm=\"foo\"")
@@ -91,7 +95,7 @@ struct Cli {
     /// use fake memory locksystem
     #[arg(short = 'f', long)]
     fakels: bool,
-    /// require basic authentication
+    /// Require a Basic header. Not authentication: any username/password is accepted.
     #[arg(short = 'a', long)]
     auth: bool,
 }

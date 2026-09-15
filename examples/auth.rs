@@ -1,3 +1,13 @@
+//! Listing-filter example — **not authentication**.
+//!
+//! This is **not** a production 401 handler. The Basic username selects a
+//! directory listing filter (`dirs` / `files` / `all`); any password is accepted.
+//! Copying this as real authentication would let every password through.
+//!
+//! Example URLs:
+//! - dav://dirs:-@127.0.0.1:4918 — responds only with directories.
+//! - dav://files:-@127.0.0.1:4918 — responds only with files.
+
 use std::{convert::Infallible, fmt::Display, net::SocketAddr, path::Path};
 
 use futures_util::{StreamExt, stream};
@@ -18,11 +28,6 @@ use dav_server::{
     localfs::LocalFs,
 };
 
-/// The server example demonstrates a limited scope policy for access to the file system.
-/// Depending on the filter specified by the user in the request, one will receive only files or directories.
-/// For example, try this URLs:
-/// - dav://dirs:-@127.0.0.1:4918 — responds only with directories.
-/// - dav://files:-@127.0.0.1:4918 — responds only with files.
 #[tokio::main]
 async fn main() {
     env_logger::init();
@@ -60,6 +65,8 @@ async fn handle(
     let filter = match Filter::from_request(&request) {
         Ok(f) => f,
         Err(err) => {
+            // 401 here means "send a filter username", not a failed login.
+            // This is **not authentication**; any password is accepted.
             let response = Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .header("WWW-Authenticate", AUTH_CHALLENGE)
@@ -140,6 +147,10 @@ enum Filter {
 }
 
 impl Filter {
+    /// Parse the Basic username as a listing filter (`dirs` / `files` / `all`).
+    ///
+    /// This is **not authentication**. The password is ignored; any value is
+    /// accepted. Username only selects which directory entries are returned.
     fn from_request(request: &Request<Incoming>) -> Result<Self, Box<dyn Display>> {
         use headers::{Authorization, HeaderMapExt, authorization::Basic};
 
