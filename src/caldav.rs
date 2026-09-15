@@ -464,8 +464,53 @@ fn to_utc(dt: &DatePerhapsTime) -> DateTime<Utc> {
     }
 }
 
-/// Component interval from DTSTART/DTEND/DUE. DATE-only DTSTART without an end
-/// lasts one day; DATE-TIME without an end is a zero-duration point.
+/// Parse an RFC 5545 3.3.6 `DURATION` value such as `P1D`, `PT1H30M`, `P1W`,
+/// `P1DT12H` or `-PT15M`.
+#[cfg(feature = "caldav")]
+fn parse_ical_duration(s: &str) -> Option<TimeDelta> {
+    let s = s.trim();
+    let (negative, rest) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let mut rest = rest.strip_prefix('P')?;
+    if rest.is_empty() {
+        return None;
+    }
+    let mut total = TimeDelta::zero();
+    let mut in_time = false;
+    while !rest.is_empty() {
+        if let Some(after_t) = rest.strip_prefix('T') {
+            if in_time || after_t.is_empty() {
+                return None;
+            }
+            in_time = true;
+            rest = after_t;
+            continue;
+        }
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits == 0 {
+            return None;
+        }
+        let n: i64 = rest[..digits].parse().ok()?;
+        let mut units = rest[digits..].chars();
+        let part = match (units.next()?, in_time) {
+            ('W', false) => TimeDelta::try_weeks(n)?,
+            ('D', false) => TimeDelta::try_days(n)?,
+            ('H', true) => TimeDelta::try_hours(n)?,
+            ('M', true) => TimeDelta::try_minutes(n)?,
+            ('S', true) => TimeDelta::try_seconds(n)?,
+            _ => return None,
+        };
+        total = total.checked_add(&part)?;
+        rest = units.as_str();
+    }
+    Some(if negative { -total } else { total })
+}
+
+/// Component interval from DTSTART/DTEND/DUE/DURATION. DATE-only DTSTART
+/// without an end lasts one day; DATE-TIME without an end is a zero-duration
+/// point.
 #[cfg(feature = "caldav")]
 fn component_span<C: Component>(comp: &C) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let start = comp.get_start();
@@ -474,15 +519,20 @@ fn component_span<C: Component>(comp: &C) -> Option<(DateTime<Utc>, DateTime<Utc
         .properties()
         .get("DUE")
         .and_then(DatePerhapsTime::from_property);
+    let duration = comp
+        .properties()
+        .get("DURATION")
+        .and_then(|p| parse_ical_duration(p.value()));
 
     match (start.as_ref(), end.as_ref(), due.as_ref()) {
         (Some(s), Some(e), _) => Some((to_utc(s), to_utc(e))),
         (Some(s), None, Some(d)) => Some((to_utc(s), to_utc(d))),
         (Some(s), None, None) => {
             let start_utc = to_utc(s);
-            let end_utc = match s {
-                DatePerhapsTime::Date(_) => start_utc + TimeDelta::days(1),
-                DatePerhapsTime::DateTime(_) => start_utc,
+            let end_utc = match (duration, s) {
+                (Some(d), _) => start_utc.checked_add_signed(d)?,
+                (None, DatePerhapsTime::Date(_)) => start_utc + TimeDelta::days(1),
+                (None, DatePerhapsTime::DateTime(_)) => start_utc,
             };
             Some((start_utc, end_utc))
         }
@@ -1091,6 +1141,84 @@ mod tests {
                 parse_caldav_date_time("20240101T130000Z").unwrap(),
             )]
         );
+    }
+
+    #[test]
+    fn parses_rfc5545_durations() {
+        assert_eq!(parse_ical_duration("P1D"), Some(TimeDelta::days(1)));
+        assert_eq!(parse_ical_duration("PT2H"), Some(TimeDelta::hours(2)));
+        assert_eq!(parse_ical_duration("PT1H30M"), Some(TimeDelta::minutes(90)));
+        assert_eq!(parse_ical_duration("P1W"), Some(TimeDelta::weeks(1)));
+        assert_eq!(parse_ical_duration("-PT15M"), Some(-TimeDelta::minutes(15)));
+        assert_eq!(parse_ical_duration("P1DT12H"), Some(TimeDelta::hours(36)));
+        assert_eq!(parse_ical_duration("PT15S"), Some(TimeDelta::seconds(15)));
+        assert_eq!(parse_ical_duration(""), None);
+        assert_eq!(parse_ical_duration("P"), None);
+        assert_eq!(parse_ical_duration("PT"), None);
+        assert_eq!(parse_ical_duration("P2H"), None);
+        assert_eq!(parse_ical_duration("PT1D"), None);
+        assert_eq!(parse_ical_duration("1H"), None);
+        assert_eq!(parse_ical_duration("P1DT"), None);
+    }
+
+    fn time_range_query(start: &str, end: &str) -> CalendarQuery {
+        let mut filter = vevent_filter();
+        filter.time_range = Some(TimeRange {
+            start: Some(start.into()),
+            end: Some(end.into()),
+        });
+        vcalendar_with(filter)
+    }
+
+    #[test]
+    fn vevent_duration_extends_span() {
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:1\nDTSTART:20240615T120000Z\nDURATION:PT2H\nEND:VEVENT\nEND:VCALENDAR";
+        assert!(calendar_matches_query(
+            ics,
+            &time_range_query("20240615T130000Z", "20240615T140000Z")
+        ));
+        assert!(!calendar_matches_query(
+            ics,
+            &time_range_query("20240615T140000Z", "20240615T150000Z")
+        ));
+
+        let cal = parse_ics(ics);
+        assert_eq!(
+            calendar_busy_intervals(
+                &cal,
+                parse_caldav_date_time("20240615T000000Z").unwrap(),
+                parse_caldav_date_time("20240616T000000Z").unwrap(),
+            ),
+            vec![(
+                parse_caldav_date_time("20240615T120000Z").unwrap(),
+                parse_caldav_date_time("20240615T140000Z").unwrap(),
+            )]
+        );
+    }
+
+    #[test]
+    fn vtodo_duration_extends_span() {
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VTODO\nUID:1\nDTSTART:20240615T120000Z\nDURATION:PT2H\nEND:VTODO\nEND:VCALENDAR";
+        let mut filter = vevent_filter();
+        filter.name = "VTODO".into();
+        filter.time_range = Some(TimeRange {
+            start: Some("20240615T130000Z".into()),
+            end: Some("20240615T140000Z".into()),
+        });
+        assert!(calendar_matches_query(ics, &vcalendar_with(filter)));
+    }
+
+    #[test]
+    fn date_dtstart_with_duration_spans_days() {
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:1\nDTSTART;VALUE=DATE:20240615\nDURATION:P2D\nEND:VEVENT\nEND:VCALENDAR";
+        assert!(calendar_matches_query(
+            ics,
+            &time_range_query("20240616T120000Z", "20240616T130000Z")
+        ));
+        assert!(!calendar_matches_query(
+            ics,
+            &time_range_query("20240617T000000Z", "20240618T000000Z")
+        ));
     }
 
     #[test]
