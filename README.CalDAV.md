@@ -150,7 +150,7 @@ The implementation supports standard CalDAV properties:
 
 ### Adding Events
 
-Store iCalendar data using PUT. PUT does not validate ICS; `validate_calendar_data` is an application helper, not applied on PUT:
+Store iCalendar data using PUT. Invalid iCalendar data in a calendar collection is rejected with 403 (`validate_calendar_data`):
 
 ```bash
 curl -X PUT http://localhost:8080/calendars/my-calendar/event.ics \
@@ -193,7 +193,7 @@ Current limitations include:
 - `free-busy-query` returns `501 Not Implemented`
 - Calendar identity is `/calendars/<name>` (immediate children of `/calendars` only)
 - `max-resource-size` is 1MB
-- PUT does not validate iCalendar data (`validate_calendar_data` is an application helper)
+- Full PUT of invalid iCalendar data into a calendar collection is 403 (`validate_calendar_data`); partial PUT/PATCH is not validated
 - No scheduling support (iTIP/iMIP)
 - Limited calendar-user-principal support
 - No calendar sharing or ACL support

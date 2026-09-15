@@ -461,6 +461,31 @@ END:VCALENDAR"
     }
 
     #[tokio::test]
+    async fn test_calendar_put_invalid_ics() {
+        let server = setup_caldav_server2().await;
+
+        let resp = put_ics_data(
+            &server,
+            "this is not iCalendar".to_string(),
+            "/calendars/my-calendar/bad.ics",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/calendars/my-calendar/bad.ics")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let ics_data = create_ics_data("valid-event", "Valid Event");
+        let resp = put_ics_data(&server, ics_data, "/calendars/my-calendar/event.ics").await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
     async fn test_calendar_put_max_resource_size() {
         let server = setup_caldav_server2().await;
 

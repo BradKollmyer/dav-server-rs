@@ -57,12 +57,13 @@
 //! - CalDAV properties (`supported-calendar-component-set`, `max-resource-size` 1MB, etc.)
 //! - `free-busy-query` returns `501 Not Implemented`
 //!
-//! PUT does not validate iCalendar bodies. `validate_calendar_data` is a helper
-//! for applications, not applied on PUT.
+//! Full PUT of invalid iCalendar data into a calendar collection is 403
+//! (`validate_calendar_data`). Partial PUT/PATCH is not validated.
 //!
 //! CardDAV support is a partial [RFC6352] implementation: MKADDRESSBOOK,
 //! addressbook-query (text-match on the named property), and addressbook-multiget.
-//! PUT does not validate vCard bodies; `validate_vcard_data` is an application helper.
+//! Full PUT of invalid vCard data into an addressbook collection is 403
+//! (`validate_vcard_data`).
 //!
 //! The litmus test suite also has tests for RFC3744 "acl" and "principal",
 //! RFC5842 "bind", and RFC3253 "versioning". Those we do not support right now.
@@ -127,11 +128,12 @@
 //!   `prop-filter` with `text-match`/`time-range`/`param-filter`) and `calendar-multiget` (hrefs confined to the collection)
 //! - CalDAV-specific properties (`max-resource-size` 1MB) and resource types
 //!
-//! `free-busy-query` returns `501 Not Implemented`. PUT does not run
-//! `validate_calendar_data`; that helper is for applications.
+//! `free-busy-query` returns `501 Not Implemented`. Full PUT into a calendar
+//! collection runs `validate_calendar_data` and returns 403 on failure.
 //!
 //! Enable `carddav` the same way for MKADDRESSBOOK, addressbook-query, and
-//! addressbook-multiget.
+//! addressbook-multiget. Full PUT into an addressbook collection runs
+//! `validate_vcard_data` and returns 403 on failure.
 //!
 //! ## Example.
 //!

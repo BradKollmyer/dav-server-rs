@@ -423,6 +423,53 @@ END:VCARD"#;
     }
 
     #[tokio::test]
+    async fn test_vcard_put_invalid() {
+        let server = setup_carddav_server().await;
+
+        let req = Request::builder()
+            .method("MKADDRESSBOOK")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert!(resp.status().is_success());
+
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/addressbooks/my-contacts/bad.vcf")
+            .header("Content-Type", "text/vcard")
+            .body(Body::from("this is not a vCard"))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/addressbooks/my-contacts/bad.vcf")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let vcard_data = r#"BEGIN:VCARD
+VERSION:3.0
+UID:test-contact-123@example.com
+FN:John Doe
+N:Doe;John;;;
+EMAIL:john.doe@example.com
+END:VCARD"#;
+
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/addressbooks/my-contacts/contact.vcf")
+            .header("Content-Type", "text/vcard")
+            .body(Body::from(vcard_data))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
     async fn test_addressbook_query_report() {
         let server = setup_carddav_server().await;
 
@@ -556,7 +603,7 @@ END:VCARD"#;
 
     #[tokio::test]
     async fn test_addressbook_query_tel_param_filter_type_home() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         let req = Request::builder()
             .method("MKADDRESSBOOK")

@@ -21,6 +21,16 @@ use crate::{DavError, DavInner, DavResult};
 
 const SABRE: &str = "application/x-sabredav-partialupdate";
 
+/// Parent collection that requires iCalendar / vCard object validation on PUT.
+#[cfg(any(feature = "caldav", feature = "carddav"))]
+#[derive(Clone, Copy)]
+enum TypedCollection {
+    #[cfg(feature = "caldav")]
+    Calendar,
+    #[cfg(feature = "carddav")]
+    Addressbook,
+}
+
 /// Size of the resource after a PUT (replace) or PATCH/partial PUT.
 #[cfg(any(feature = "caldav", feature = "carddav"))]
 fn resulting_resource_size(
@@ -230,6 +240,12 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         #[cfg(any(feature = "caldav", feature = "carddav"))]
         let size_limit = self.max_resource_size_limit(&path).await;
         #[cfg(any(feature = "caldav", feature = "carddav"))]
+        let typed_collection = if do_range {
+            None
+        } else {
+            self.typed_parent_collection(&path).await
+        };
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
         let existing_len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
         #[cfg(any(feature = "caldav", feature = "carddav"))]
         if let Some(max) = size_limit
@@ -289,6 +305,8 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         // loop, read body, write to file.
         let mut total = 0u64;
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        let mut typed_body = typed_collection.is_some().then(Vec::new);
 
         while let Some(data) = body.frame().await {
             let data_frame = data.map_err(|e| to_ioerror(e))?;
@@ -317,8 +335,19 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             };
             if let Some(bytes) = b {
                 let bytes = std::mem::replace(bytes, Bytes::new());
+                #[cfg(any(feature = "caldav", feature = "carddav"))]
+                if let Some(ref mut collected) = typed_body {
+                    collected.extend_from_slice(&bytes);
+                }
                 file.write_bytes(bytes).await?;
             } else {
+                #[cfg(any(feature = "caldav", feature = "carddav"))]
+                if let Some(ref mut collected) = typed_body {
+                    let bytes = buf.copy_to_bytes(buf.remaining());
+                    collected.extend_from_slice(&bytes);
+                    file.write_bytes(bytes).await?;
+                    continue;
+                }
                 file.write_buf(Box::new(buf)).await?;
             }
         }
@@ -333,6 +362,13 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         if have_count && total < count {
             error!("PUT file: premature EOF on input");
             return Err(DavError::StatusClose(SC::BAD_REQUEST));
+        }
+
+        // RFC 4791 5.3.2.1 / RFC 6352 6.3.2: full PUT into a typed collection
+        // must reject invalid calendar/address data with 403.
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        if let (Some(kind), Some(body)) = (typed_collection, typed_body.as_deref()) {
+            self.reject_invalid_typed_put(&path, kind, body).await?;
         }
 
         // Report whether we created or updated the file.
@@ -360,6 +396,46 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             }
         }
         Ok(res)
+    }
+
+    /// Parent calendar or addressbook collection, if this PUT needs object validation.
+    #[cfg(any(feature = "caldav", feature = "carddav"))]
+    async fn typed_parent_collection(&self, path: &DavPath) -> Option<TypedCollection> {
+        let parent = path.parent();
+        let meta = self.fs.metadata(&parent, &self.credentials).await.ok()?;
+        #[cfg(feature = "caldav")]
+        if meta.is_calendar(&parent) {
+            return Some(TypedCollection::Calendar);
+        }
+        #[cfg(feature = "carddav")]
+        if meta.is_addressbook(&parent) {
+            return Some(TypedCollection::Addressbook);
+        }
+        None
+    }
+
+    /// RFC 4791 5.3.2.1 / RFC 6352 6.3.2: invalid object data is 403; drop the resource.
+    #[cfg(any(feature = "caldav", feature = "carddav"))]
+    async fn reject_invalid_typed_put(
+        &self,
+        path: &DavPath,
+        kind: TypedCollection,
+        body: &[u8],
+    ) -> DavResult<()> {
+        let valid = match std::str::from_utf8(body) {
+            Ok(text) => match kind {
+                #[cfg(feature = "caldav")]
+                TypedCollection::Calendar => crate::caldav::validate_calendar_data(text).is_ok(),
+                #[cfg(feature = "carddav")]
+                TypedCollection::Addressbook => crate::carddav::validate_vcard_data(text).is_ok(),
+            },
+            Err(_) => false,
+        };
+        if valid {
+            return Ok(());
+        }
+        let _ = self.fs.remove_file(path, &self.credentials).await;
+        Err(DavError::StatusClose(SC::FORBIDDEN))
     }
 
     /// Limit for calendar/addressbook object PUT/PATCH, if the parent is such a collection.
