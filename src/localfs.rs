@@ -732,7 +732,7 @@ impl DavFileSystem for LocalFs {
             #[cfg(not(any(windows, target_vendor = "apple", target_os = "freebsd")))]
             {
                 let _ = (self, davpath, tm);
-                return Err(FsError::NotImplemented);
+                Err(FsError::NotImplemented)
             }
             #[cfg(any(windows, target_vendor = "apple", target_os = "freebsd"))]
             {
