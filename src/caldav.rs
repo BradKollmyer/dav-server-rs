@@ -41,6 +41,9 @@ pub const DEFAULT_CALDAV_NAME: &str = "calendars";
 pub const DEFAULT_CALDAV_DIRECTORY: &str = "/calendars";
 pub const DEFAULT_CALDAV_DIRECTORY_ENDSLASH: &str = "/calendars/";
 
+/// Default maximum calendar object size (1MB), advertised as `C:max-resource-size`.
+pub const DEFAULT_MAX_RESOURCE_SIZE: u64 = 1024 * 1024;
+
 /// CalDAV resource types
 #[derive(Debug, Clone, PartialEq)]
 pub enum CalDavResourceType {
@@ -97,7 +100,7 @@ impl Default for CalendarProperties {
                 CalendarComponentType::VJournal,
                 CalendarComponentType::VFreeBusy,
             ],
-            max_resource_size: Some(1024 * 1024), // 1MB default
+            max_resource_size: Some(DEFAULT_MAX_RESOURCE_SIZE),
             color: None,
             display_name: None,
         }

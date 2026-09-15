@@ -438,6 +438,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                         .open(&item_path, OpenOptions::read(), &self.credentials)
                         .await
                         && let Ok(metadata) = file.metadata().await
+                        && metadata.len() <= DEFAULT_MAX_RESOURCE_SIZE
                         && let Ok(data) = file.read_bytes(metadata.len() as usize).await
                         && is_calendar_data(&data)
                     {
@@ -476,6 +477,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     .open(&item_path, OpenOptions::read(), &self.credentials)
                     .await
                 && let Ok(metadata) = file.metadata().await
+                && metadata.len() <= DEFAULT_MAX_RESOURCE_SIZE
                 && let Ok(data) = file.read_bytes(metadata.len() as usize).await
                 && is_calendar_data(&data)
             {

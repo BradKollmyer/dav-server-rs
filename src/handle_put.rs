@@ -21,6 +21,26 @@ use crate::{DavError, DavInner, DavResult};
 
 const SABRE: &str = "application/x-sabredav-partialupdate";
 
+/// Size of the resource after a PUT (replace) or PATCH/partial PUT.
+#[cfg(any(feature = "caldav", feature = "carddav"))]
+fn resulting_resource_size(
+    do_range: bool,
+    append: bool,
+    existing: u64,
+    start: u64,
+    written: u64,
+) -> u64 {
+    if do_range {
+        if append {
+            existing.saturating_add(written)
+        } else {
+            existing.max(start.saturating_add(written))
+        }
+    } else {
+        written
+    }
+}
+
 // This is a nice hack. If the type 'E' is actually an io::Error or a Box<io::Error>,
 // convert it back into a real io::Error. If it is a DavError or a Box<DavError>,
 // use its Into<io::Error> impl. Otherwise just wrap the error in io::Error::new.
@@ -207,6 +227,21 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             }
         }
 
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        let size_limit = self.max_resource_size_limit(&path).await;
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        let existing_len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        if let Some(max) = size_limit
+            && have_count
+        {
+            let resulting =
+                resulting_resource_size(do_range, oo.append, existing_len, start, count);
+            if resulting > max {
+                return Err(DavError::StatusClose(SC::FORBIDDEN));
+            }
+        }
+
         // tweak open options.
         if req
             .headers()
@@ -225,6 +260,8 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         let create = oo.create;
         let create_new = oo.create_new;
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        let append = oo.append;
         let mut file = match self.fs.open(&path, oo, &self.credentials).await {
             Ok(f) => f,
             Err(FsError::NotFound) | Err(FsError::Exists) => {
@@ -261,6 +298,14 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             };
 
             total += buf.remaining() as u64;
+            #[cfg(any(feature = "caldav", feature = "carddav"))]
+            if let Some(max) = size_limit {
+                let resulting =
+                    resulting_resource_size(do_range, append, existing_len, start, total);
+                if resulting > max {
+                    return Err(DavError::StatusClose(SC::FORBIDDEN));
+                }
+            }
             // consistency check.
             if have_count && total > count {
                 break;
@@ -315,6 +360,33 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             }
         }
         Ok(res)
+    }
+
+    /// Limit for calendar/addressbook object PUT/PATCH, if the parent is such a collection.
+    #[cfg(any(feature = "caldav", feature = "carddav"))]
+    async fn max_resource_size_limit(&self, path: &DavPath) -> Option<u64> {
+        let parent = path.parent();
+        if let Ok(meta) = self.fs.metadata(&parent, &self.credentials).await {
+            #[cfg(feature = "caldav")]
+            if meta.is_calendar(&parent) {
+                return Some(crate::caldav::DEFAULT_MAX_RESOURCE_SIZE);
+            }
+            #[cfg(feature = "carddav")]
+            if meta.is_addressbook(&parent) {
+                return Some(crate::carddav::DEFAULT_MAX_RESOURCE_SIZE);
+            }
+        }
+
+        #[cfg(feature = "caldav")]
+        if crate::caldav::is_path_in_caldav_directory(path) {
+            return Some(crate::caldav::DEFAULT_MAX_RESOURCE_SIZE);
+        }
+        #[cfg(feature = "carddav")]
+        if crate::carddav::is_path_in_carddav_directory(path) {
+            return Some(crate::carddav::DEFAULT_MAX_RESOURCE_SIZE);
+        }
+
+        None
     }
 
     /// Parse ownCloud/Nextcloud `X-OC-MTime` / `X-OC-CTime` headers.

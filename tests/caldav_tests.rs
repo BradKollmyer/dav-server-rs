@@ -356,6 +356,20 @@ END:VCALENDAR"
     }
 
     #[tokio::test]
+    async fn test_calendar_put_max_resource_size() {
+        let server = setup_caldav_server2().await;
+
+        let small = create_ics_data("small-event", "Small Event");
+        let resp = put_ics_data(&server, small, "/calendars/my-calendar/small.ics").await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let mut big = create_ics_data("big-event", "Big Event");
+        big.push_str(&"X".repeat(DEFAULT_MAX_RESOURCE_SIZE as usize + 1));
+        let resp = put_ics_data(&server, big, "/calendars/my-calendar/big.ics").await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn test_calendar_query_report() {
         let server = setup_caldav_server2().await;
         let ics_data = create_ics_data("test-event-1", "Test Event");

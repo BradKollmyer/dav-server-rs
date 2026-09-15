@@ -31,9 +31,17 @@ use crate::util::{
 use crate::{DavInner, DavResult};
 
 #[cfg(feature = "caldav")]
-use crate::caldav::*;
+use crate::caldav::{
+    CalendarComponentType, DEFAULT_CALDAV_DIRECTORY, DEFAULT_CALDAV_DIRECTORY_ENDSLASH,
+    DEFAULT_MAX_RESOURCE_SIZE as CALDAV_MAX_RESOURCE_SIZE, NS_CALDAV_URI, create_calendar_home_set,
+    create_supported_calendar_component_set, create_supported_calendar_data,
+};
 #[cfg(feature = "carddav")]
-use crate::carddav::*;
+use crate::carddav::{
+    DEFAULT_CARDDAV_DIRECTORY, DEFAULT_CARDDAV_DIRECTORY_ENDSLASH,
+    DEFAULT_MAX_RESOURCE_SIZE as CARDDAV_MAX_RESOURCE_SIZE, NS_CARDDAV_URI,
+    create_addressbook_home_set, create_supported_address_data,
+};
 
 const NS_APACHE_URI: &str = "http://apache.org/dav/props/";
 const NS_DAV_URI: &str = "DAV:";
@@ -1174,8 +1182,8 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                             return self.build_elem(docontent, pfx, prop, timezone);
                         }
                         "max-resource-size" => {
-                            return self.build_elem(docontent, pfx, prop, "1048576");
-                            // 1MB
+                            let size = CALDAV_MAX_RESOURCE_SIZE.to_string();
+                            return self.build_elem(docontent, pfx, prop, size);
                         }
                         "min-date-time" => {
                             return self.build_elem(docontent, pfx, prop, "19000101T000000Z");
@@ -1226,7 +1234,7 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                             }
                         }
                         "max-resource-size" => {
-                            let size = DEFAULT_MAX_RESOURCE_SIZE.to_string();
+                            let size = CARDDAV_MAX_RESOURCE_SIZE.to_string();
                             return self.build_elem(docontent, pfx, prop, size);
                         }
                         _ => {}
