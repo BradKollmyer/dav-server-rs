@@ -36,6 +36,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         body: &[u8],
     ) -> DavResult<Response<Body>> {
         let path = self.path(req);
+        self.ensure_visible(&path).await?;
 
         // Parse the REPORT request body
         let report_type = self.parse_carddav_report_request(body)?;
@@ -327,7 +328,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         // Get directory listing
         let stream = self
             .fs
-            .read_dir(path, ReadDirMeta::Data, &self.credentials)
+            .read_dir(path, self.get_read_dir_meta(), &self.credentials)
             .await?;
         let mut results = Vec::new();
 
@@ -343,6 +344,9 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
             match item {
                 Ok(dirent) => {
+                    if self.hidden_in_listing(dirent.as_ref()).await {
+                        continue;
+                    }
                     let mut item_path = path.clone();
                     item_path.push_segment(&dirent.name());
 
@@ -390,6 +394,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             // addressed to an address object resource.
             if let Ok(item_path) = DavPath::from_str_and_prefix(href, &self.prefix)
                 && (item_path.is_in_collection(path) || item_path == *path)
+                && self.ensure_visible(&item_path).await.is_ok()
                 && let Ok(mut file) = self
                     .fs
                     .open(&item_path, OpenOptions::read(), &self.credentials)

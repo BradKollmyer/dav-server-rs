@@ -60,6 +60,17 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         Ok(())
     }
 
+    /// Whether a listing (PROPFIND, REPORT) skips this entry: a dot-prefixed name
+    /// under InListings/Always, or a symlink as seen through `get_read_dir_meta()`.
+    pub(crate) async fn hidden_in_listing(&self, dirent: &dyn DavDirEntry) -> bool {
+        let hide_dot_prefix = self.hide_dot_prefix == DavOptionHide::InListings
+            || self.hide_dot_prefix == DavOptionHide::Always;
+        if hide_dot_prefix && dirent.name().starts_with(b".") {
+            return true;
+        }
+        matches!(dirent.metadata().await, Ok(meta) if meta.is_symlink())
+    }
+
     /// Returns the metadata depending on hide_symlinks & hide_dot_prefix
     pub(crate) async fn visible_metadata(&self, path: &DavPath) -> DavResult<Box<dyn DavMetaData>> {
         self.ensure_visible(path).await?;

@@ -1186,6 +1186,119 @@ END:VCALENDAR"
         );
     }
 
+    /// A calendar with a visible and a dot-prefixed event, served by a
+    /// handler that hides dot-prefixed names. The hidden file is created
+    /// through a second handler on the same MemFs that does not hide it.
+    async fn setup_hidden_calendar_server() -> DavHandler {
+        let fs = dav_server::memfs::MemFs::new();
+        let writer = DavHandler::builder()
+            .filesystem(fs.clone())
+            .locksystem(FakeLs::new())
+            .build_handler();
+        mkcol(&writer, "/calendars").await;
+        for uri in ["/calendars/my-calendar", "/calendars/.hidden-cal"] {
+            let req = Request::builder()
+                .method("MKCALENDAR")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let resp = writer.handle(req).await;
+            assert_eq!(resp.status(), StatusCode::CREATED, "MKCALENDAR {uri}");
+        }
+        let ics = create_ics_data("visible-event", "Visible Event");
+        let resp = put_ics_data(&writer, ics, "/calendars/my-calendar/visible.ics").await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let ics = create_ics_data("hidden-event", "Hidden Event");
+        let resp = put_ics_data(&writer, ics, "/calendars/my-calendar/.hidden.ics").await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        DavHandler::builder()
+            .filesystem(fs)
+            .locksystem(FakeLs::new())
+            .hide_dot_prefix(dav_server::DavOptionHide::Always)
+            .build_handler()
+    }
+
+    #[tokio::test]
+    async fn test_calendar_query_skips_hidden_entries() {
+        let server = setup_hidden_calendar_server().await;
+
+        let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR"/>
+  </C:filter>
+</C:calendar-query>"#;
+
+        let (status, body_str) = report_calendar_query(&server, report_body).await;
+        assert_eq!(status, StatusCode::MULTI_STATUS);
+        assert!(
+            body_str.contains("Visible Event"),
+            "visible event missing: {body_str}"
+        );
+        assert!(
+            !body_str.contains(".hidden.ics") && !body_str.contains("Hidden Event"),
+            "hidden event must not be listed: {body_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_calendar_multiget_hidden_href_is_404() {
+        let server = setup_hidden_calendar_server().await;
+
+        let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <D:href>/calendars/my-calendar/visible.ics</D:href>
+  <D:href>/calendars/my-calendar/.hidden.ics</D:href>
+</C:calendar-multiget>"#;
+
+        let (status, body_str) = report_calendar_query(&server, report_body).await;
+        assert_eq!(status, StatusCode::MULTI_STATUS);
+        assert!(
+            body_str.contains("Visible Event"),
+            "visible event missing: {body_str}"
+        );
+        assert!(
+            !body_str.contains("Hidden Event"),
+            "hidden calendar-data must not be returned: {body_str}"
+        );
+        assert!(
+            body_str.contains("/calendars/my-calendar/.hidden.ics")
+                && body_str.contains("404 Not Found"),
+            "hidden href must be 404: {body_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_report_on_hidden_calendar_is_404() {
+        let server = setup_hidden_calendar_server().await;
+
+        let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR"/>
+  </C:filter>
+</C:calendar-query>"#;
+
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/calendars/.hidden-cal/")
+            .header("Depth", "1")
+            .body(Body::from(report_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     #[test]
     fn test_is_calendar_data() {
         let valid_ical = b"BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR\n";

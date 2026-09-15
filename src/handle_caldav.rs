@@ -35,6 +35,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         }
 
         let path = self.path(req);
+        self.ensure_visible(&path).await?;
 
         // Parse the REPORT request body as CalDAV
         let report_type = self.parse_report_request(body)?;
@@ -486,7 +487,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         // Get directory listing
         let stream = self
             .fs
-            .read_dir(path, ReadDirMeta::Data, &self.credentials)
+            .read_dir(path, self.get_read_dir_meta(), &self.credentials)
             .await?;
         let mut results = Vec::new();
 
@@ -494,6 +495,9 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         for item in items {
             match item {
                 Ok(dirent) => {
+                    if self.hidden_in_listing(dirent.as_ref()).await {
+                        continue;
+                    }
                     let mut item_path = path.clone();
                     item_path.push_segment(&dirent.name());
 
@@ -540,6 +544,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             // addressed to a calendar object resource.
             if let Ok(item_path) = DavPath::from_str_and_prefix(href, &self.prefix)
                 && (item_path.is_in_collection(path) || item_path == *path)
+                && self.ensure_visible(&item_path).await.is_ok()
                 && let Ok(mut file) = self
                     .fs
                     .open(&item_path, OpenOptions::read(), &self.credentials)
@@ -573,13 +578,16 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         let stream = self
             .fs
-            .read_dir(path, ReadDirMeta::Data, &self.credentials)
+            .read_dir(path, self.get_read_dir_meta(), &self.credentials)
             .await?;
         let mut busy = Vec::new();
 
         let items: Vec<_> = stream.collect().await;
         for item in items {
             let Ok(dirent) = item else { continue };
+            if self.hidden_in_listing(dirent.as_ref()).await {
+                continue;
+            }
             let mut item_path = path.clone();
             item_path.push_segment(&dirent.name());
 
