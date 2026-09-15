@@ -20,7 +20,10 @@ pub(crate) trait ElementExt {
     fn ns<S: Into<String>>(self, prefix: S, namespace: S) -> Self;
     /// Builder.
     fn text<T: Into<String>>(self, t: T) -> Self;
-    /// Like parse, but returns DavError.
+    /// Parse a document into its root element.
+    ///
+    /// `xmltree::Element::parse` hits `unreachable!()` when there is no root
+    /// element, so empty or comment-only documents are mapped to XmlParseError.
     fn parse2<R: Read>(r: R) -> Result<Element, DavError>;
     /// Add a child element.
     fn push_element(&mut self, e: Element);
@@ -109,9 +112,14 @@ impl ElementExt for Element {
     }
 
     fn parse2<R: Read>(r: R) -> Result<Element, DavError> {
-        let res = Element::parse(r);
-        match res {
-            Ok(elems) => Ok(elems),
+        match Element::parse_all(r) {
+            Ok(nodes) => nodes
+                .into_iter()
+                .find_map(|n| match n {
+                    XMLNode::Element(elem) => Some(elem),
+                    _ => None,
+                })
+                .ok_or(DavError::XmlParseError),
             Err(xmltree::ParseError::MalformedXml(_)) => Err(DavError::XmlParseError),
             Err(_) => Err(DavError::XmlReadError),
         }
@@ -188,4 +196,36 @@ pub(crate) fn emitter<W: Write>(w: W) -> DavResult<EventWriter<W>> {
         standalone: None,
     })?;
     Ok(emitter)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn parse_bytes(data: &[u8]) -> Result<Element, DavError> {
+        Element::parse2(Cursor::new(data))
+    }
+
+    #[test]
+    fn parse2_rejects_empty_or_rootless_documents() {
+        for body in [
+            &b""[..],
+            b"\n",
+            b"   \t\r\n",
+            b"<?xml version=\"1.0\"?>",
+            b"<!-- comment only -->",
+        ] {
+            assert!(
+                matches!(parse_bytes(body), Err(DavError::XmlParseError)),
+                "expected XmlParseError for {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse2_accepts_root_element() {
+        let elem = parse_bytes(b"<propfind xmlns=\"DAV:\"/>").expect("root element");
+        assert_eq!(elem.name, "propfind");
+    }
 }

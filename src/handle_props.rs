@@ -295,9 +295,10 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         let meta = self.visible_metadata(&path).await?;
         let meta = self.fixpath(&mut res, &mut path, meta);
 
+        // Empty or whitespace-only PROPFIND body means allprop (RFC 4918).
         let mut root = None;
-        if !xmldata.is_empty() {
-            root = match Element::parse(Cursor::new(xmldata)) {
+        if !xmldata.trim_ascii().is_empty() {
+            root = match Element::parse2(Cursor::new(xmldata)) {
                 Ok(t) => {
                     if t.name == "propfind" && t.namespace.as_deref() == Some("DAV:") {
                         Some(t)
@@ -1229,7 +1230,7 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
             // asking for a specific property.
             let dprop = element_to_davprop(prop);
             if let Ok(xml) = self.fs.get_prop(path, dprop, &self.credentials).await
-                && let Ok(e) = Element::parse(Cursor::new(xml))
+                && let Ok(e) = Element::parse2(Cursor::new(xml))
             {
                 return Ok(StatusElement {
                     status: StatusCode::OK,

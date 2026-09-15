@@ -718,3 +718,103 @@ mod win32_mtime_localfs_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(feature = "memfs")]
+mod empty_xml_body_tests {
+    use dav_server::{DavHandler, body::Body, fakels::FakeLs, memfs::MemFs};
+    use http::{Request, StatusCode};
+
+    fn setup() -> DavHandler {
+        DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .build_handler()
+    }
+
+    #[tokio::test]
+    async fn propfind_whitespace_body_is_allprop() {
+        let server = setup();
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/")
+            .header("Depth", "0")
+            .body(Body::from("\n"))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+    }
+
+    #[tokio::test]
+    async fn propfind_xml_declaration_only_is_bad_request() {
+        let server = setup();
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/")
+            .header("Depth", "0")
+            .body(Body::from(r#"<?xml version="1.0"?>"#))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(feature = "proppatch")]
+    #[tokio::test]
+    async fn proppatch_empty_or_rootless_body_is_bad_request() {
+        let server = setup();
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/notes.txt")
+                    .body(Body::from("hello"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        for body in [
+            Body::empty(),
+            Body::from("\n"),
+            Body::from(r#"<?xml version="1.0"?>"#),
+        ] {
+            let resp = server
+                .handle(
+                    Request::builder()
+                        .method("PROPPATCH")
+                        .uri("/notes.txt")
+                        .body(body)
+                        .unwrap(),
+                )
+                .await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn lock_rootless_xml_is_bad_request() {
+        let server = setup();
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/notes.txt")
+                    .body(Body::from("hello"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        for xml in ["\n", r#"<?xml version="1.0"?>"#] {
+            let resp = server
+                .handle(
+                    Request::builder()
+                        .method("LOCK")
+                        .uri("/notes.txt")
+                        .body(Body::from(xml))
+                        .unwrap(),
+                )
+                .await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+}
