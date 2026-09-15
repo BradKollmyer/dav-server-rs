@@ -1549,3 +1549,758 @@ mod propfind_propstat_tests {
         );
     }
 }
+
+#[cfg(feature = "memfs")]
+mod get_delete_copymove_tests {
+    use dav_server::{DavHandler, body::Body, fakels::FakeLs, memfs::MemFs};
+    use http::{Request, StatusCode, header};
+
+    fn setup() -> DavHandler {
+        DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .build_handler()
+    }
+
+    async fn resp_to_bytes(mut resp: http::Response<Body>) -> Vec<u8> {
+        use futures_util::StreamExt;
+
+        let mut data = Vec::new();
+        let body = resp.body_mut();
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => data.extend_from_slice(&bytes),
+                Err(e) => panic!("Error reading body stream: {e}"),
+            }
+        }
+        data
+    }
+
+    async fn resp_to_string(resp: http::Response<Body>) -> String {
+        String::from_utf8(resp_to_bytes(resp).await).unwrap_or_default()
+    }
+
+    async fn put(server: &DavHandler, uri: &str, body: &str) -> StatusCode {
+        server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .status()
+    }
+
+    async fn mkcol(server: &DavHandler, uri: &str) -> StatusCode {
+        server
+            .handle(
+                Request::builder()
+                    .method("MKCOL")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .status()
+    }
+
+    async fn get(server: &DavHandler, uri: &str) -> http::Response<Body> {
+        server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+    }
+
+    fn header_str(resp: &http::Response<Body>, name: &str) -> Option<String> {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    }
+
+    #[tokio::test]
+    async fn get_and_head_file() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/notes.txt", "hello world").await,
+            StatusCode::CREATED
+        );
+
+        let resp = get(&server, "/notes.txt").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(header_str(&resp, "accept-ranges").as_deref(), Some("bytes"));
+        assert_eq!(header_str(&resp, "content-length").as_deref(), Some("11"));
+        assert!(
+            header_str(&resp, "content-type")
+                .as_deref()
+                .is_some_and(|t| t.starts_with("text/plain")),
+            "content-type: {:?}",
+            header_str(&resp, "content-type")
+        );
+        assert!(header_str(&resp, "etag").is_some());
+        assert_eq!(resp_to_string(resp).await, "hello world");
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("HEAD")
+                    .uri("/notes.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(header_str(&resp, "content-length").as_deref(), Some("11"));
+        assert_eq!(header_str(&resp, "accept-ranges").as_deref(), Some("bytes"));
+        assert!(resp_to_bytes(resp).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_missing_is_not_found() {
+        let server = setup();
+        assert_eq!(
+            get(&server, "/nope.txt").await.status(),
+            StatusCode::NOT_FOUND
+        );
+        let head = server
+            .handle(
+                Request::builder()
+                    .method("HEAD")
+                    .uri("/nope.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(head.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_single_range() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/notes.txt", "hello world").await,
+            StatusCode::CREATED
+        );
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/notes.txt")
+                    .header(header::RANGE, "bytes=0-4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            header_str(&resp, "content-range").as_deref(),
+            Some("bytes 0-4/11")
+        );
+        assert_eq!(header_str(&resp, "content-length").as_deref(), Some("5"));
+        assert_eq!(resp_to_string(resp).await, "hello");
+    }
+
+    #[tokio::test]
+    async fn get_open_and_suffix_ranges() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/notes.txt", "hello world").await,
+            StatusCode::CREATED
+        );
+
+        let from = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/notes.txt")
+                    .header(header::RANGE, "bytes=6-")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(from.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            header_str(&from, "content-range").as_deref(),
+            Some("bytes 6-10/11")
+        );
+        assert_eq!(resp_to_string(from).await, "world");
+
+        let suffix = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/notes.txt")
+                    .header(header::RANGE, "bytes=-5")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(suffix.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            header_str(&suffix, "content-range").as_deref(),
+            Some("bytes 6-10/11")
+        );
+        assert_eq!(resp_to_string(suffix).await, "world");
+    }
+
+    #[tokio::test]
+    async fn get_unsatisfiable_range() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/notes.txt", "hello world").await,
+            StatusCode::CREATED
+        );
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/notes.txt")
+                    .header(header::RANGE, "bytes=100-200")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            header_str(&resp, "content-range").as_deref(),
+            Some("bytes */11")
+        );
+        assert!(resp_to_bytes(resp).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_multipart_ranges() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/notes.txt", "hello world").await,
+            StatusCode::CREATED
+        );
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/notes.txt")
+                    .header(header::RANGE, "bytes=0-0,10-10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        let ctype = header_str(&resp, "content-type").unwrap_or_default();
+        assert!(
+            ctype.contains("multipart/byteranges") && ctype.contains("BOUNDARY"),
+            "content-type: {ctype}"
+        );
+        let body = resp_to_string(resp).await;
+        assert!(body.contains("--BOUNDARY"), "{body}");
+        assert!(body.contains("bytes 0-0/11"), "{body}");
+        assert!(body.contains("bytes 10-10/11"), "{body}");
+        assert!(
+            body.contains("\nh\n") || body.contains("\r\nh\r\n") || body.contains("h"),
+            "{body}"
+        );
+        assert!(body.contains('d'), "{body}");
+        assert!(body.contains("--BOUNDARY--"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn head_with_range_has_no_body() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/notes.txt", "hello world").await,
+            StatusCode::CREATED
+        );
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("HEAD")
+                    .uri("/notes.txt")
+                    .header(header::RANGE, "bytes=0-4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            header_str(&resp, "content-range").as_deref(),
+            Some("bytes 0-4/11")
+        );
+        assert_eq!(header_str(&resp, "content-length").as_deref(), Some("5"));
+        assert!(resp_to_bytes(resp).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_if_range_and_if_none_match() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/notes.txt", "hello world").await,
+            StatusCode::CREATED
+        );
+
+        let first = get(&server, "/notes.txt").await;
+        let etag = header_str(&first, "etag").expect("etag");
+        assert_eq!(resp_to_string(first).await, "hello world");
+
+        let matched = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/notes.txt")
+                    .header(header::IF_RANGE, &etag)
+                    .header(header::RANGE, "bytes=0-4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(matched.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp_to_string(matched).await, "hello");
+
+        let mismatched = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/notes.txt")
+                    .header(header::IF_RANGE, "\"not-the-etag\"")
+                    .header(header::RANGE, "bytes=0-4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(mismatched.status(), StatusCode::OK);
+        assert_eq!(resp_to_string(mismatched).await, "hello world");
+
+        let not_modified = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/notes.txt")
+                    .header(header::IF_NONE_MATCH, &etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        assert!(resp_to_bytes(not_modified).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_directory_redirect_and_autoindex() {
+        let server = DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .autoindex(true)
+            .build_handler();
+
+        assert_eq!(mkcol(&server, "/coll").await, StatusCode::CREATED);
+        assert_eq!(
+            put(&server, "/coll/child.txt", "hi").await,
+            StatusCode::CREATED
+        );
+
+        let redirect = get(&server, "/coll").await;
+        assert_eq!(redirect.status(), StatusCode::FOUND);
+        assert_eq!(header_str(&redirect, "location").as_deref(), Some("/coll/"));
+
+        let index = get(&server, "/coll/").await;
+        assert_eq!(index.status(), StatusCode::OK);
+        assert!(
+            header_str(&index, "content-type")
+                .as_deref()
+                .is_some_and(|t| t.starts_with("text/html")),
+            "content-type: {:?}",
+            header_str(&index, "content-type")
+        );
+        let html = resp_to_string(index).await;
+        assert!(html.contains("Index of"), "{html}");
+        assert!(html.contains("child.txt"), "{html}");
+        assert!(html.contains("Parent Directory"), "{html}");
+
+        let head = server
+            .handle(
+                Request::builder()
+                    .method("HEAD")
+                    .uri("/coll/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(head.status(), StatusCode::OK);
+        assert!(resp_to_bytes(head).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_directory_without_autoindex_is_method_not_allowed() {
+        let server = setup();
+        assert_eq!(mkcol(&server, "/coll").await, StatusCode::CREATED);
+        assert_eq!(
+            get(&server, "/coll/").await.status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+    }
+
+    #[tokio::test]
+    async fn get_indexfile_on_collection() {
+        let server = DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .indexfile("index.txt")
+            .build_handler();
+
+        assert_eq!(mkcol(&server, "/coll").await, StatusCode::CREATED);
+        assert_eq!(
+            put(&server, "/coll/index.txt", "welcome").await,
+            StatusCode::CREATED
+        );
+
+        let resp = get(&server, "/coll/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp_to_string(resp).await, "welcome");
+    }
+
+    #[tokio::test]
+    async fn get_remote_php_webdav_probe() {
+        let server = setup();
+        let resp = get(&server, "/remote.php/webdav/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(header_str(&resp, "content-length").as_deref(), Some("0"));
+        assert_eq!(header_str(&resp, "accept-ranges").as_deref(), Some("bytes"));
+        assert!(resp_to_bytes(resp).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_file_and_missing() {
+        let server = setup();
+        assert_eq!(put(&server, "/notes.txt", "bye").await, StatusCode::CREATED);
+
+        let deleted = server
+            .handle(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/notes.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            get(&server, "/notes.txt").await.status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let missing = server
+            .handle(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/notes.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_collection_recursive() {
+        let server = setup();
+        assert_eq!(mkcol(&server, "/coll").await, StatusCode::CREATED);
+        assert_eq!(mkcol(&server, "/coll/sub").await, StatusCode::CREATED);
+        assert_eq!(put(&server, "/coll/a.txt", "a").await, StatusCode::CREATED);
+        assert_eq!(
+            put(&server, "/coll/sub/b.txt", "b").await,
+            StatusCode::CREATED
+        );
+
+        let deleted = server
+            .handle(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/coll")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            get(&server, "/coll/a.txt").await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get(&server, "/coll/sub/b.txt").await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(get(&server, "/coll/").await.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_collection_depth_zero() {
+        let server = setup();
+        assert_eq!(mkcol(&server, "/empty").await, StatusCode::CREATED);
+        let empty = server
+            .handle(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/empty")
+                    .header("Depth", "0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(empty.status(), StatusCode::NO_CONTENT);
+
+        assert_eq!(mkcol(&server, "/coll").await, StatusCode::CREATED);
+        assert_eq!(put(&server, "/coll/a.txt", "a").await, StatusCode::CREATED);
+        let nonempty = server
+            .handle(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/coll")
+                    .header("Depth", "0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(nonempty.status(), StatusCode::FORBIDDEN);
+        assert_eq!(get(&server, "/coll/a.txt").await.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn delete_depth_one_is_bad_request() {
+        let server = setup();
+        assert_eq!(mkcol(&server, "/coll").await, StatusCode::CREATED);
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/coll")
+                    .header("Depth", "1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    async fn copy(
+        server: &DavHandler,
+        src: &str,
+        dest: &str,
+        overwrite: Option<&str>,
+        depth: Option<&str>,
+    ) -> StatusCode {
+        let mut builder = Request::builder()
+            .method("COPY")
+            .uri(src)
+            .header("Destination", dest);
+        if let Some(o) = overwrite {
+            builder = builder.header("Overwrite", o);
+        }
+        if let Some(d) = depth {
+            builder = builder.header("Depth", d);
+        }
+        server
+            .handle(builder.body(Body::empty()).unwrap())
+            .await
+            .status()
+    }
+
+    async fn move_(
+        server: &DavHandler,
+        src: &str,
+        dest: &str,
+        overwrite: Option<&str>,
+        depth: Option<&str>,
+    ) -> StatusCode {
+        let mut builder = Request::builder()
+            .method("MOVE")
+            .uri(src)
+            .header("Destination", dest);
+        if let Some(o) = overwrite {
+            builder = builder.header("Overwrite", o);
+        }
+        if let Some(d) = depth {
+            builder = builder.header("Depth", d);
+        }
+        server
+            .handle(builder.body(Body::empty()).unwrap())
+            .await
+            .status()
+    }
+
+    #[tokio::test]
+    async fn copy_file_create_and_overwrite() {
+        let server = setup();
+        assert_eq!(put(&server, "/a.txt", "alpha").await, StatusCode::CREATED);
+        assert_eq!(
+            copy(&server, "/a.txt", "/b.txt", None, None).await,
+            StatusCode::CREATED
+        );
+        assert_eq!(resp_to_string(get(&server, "/a.txt").await).await, "alpha");
+        assert_eq!(resp_to_string(get(&server, "/b.txt").await).await, "alpha");
+
+        assert_eq!(put(&server, "/c.txt", "gamma").await, StatusCode::CREATED);
+        assert_eq!(
+            copy(&server, "/a.txt", "/c.txt", Some("F"), None).await,
+            StatusCode::PRECONDITION_FAILED
+        );
+        assert_eq!(resp_to_string(get(&server, "/c.txt").await).await, "gamma");
+
+        assert_eq!(
+            copy(&server, "/a.txt", "/c.txt", Some("T"), None).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(resp_to_string(get(&server, "/c.txt").await).await, "alpha");
+    }
+
+    #[tokio::test]
+    async fn copy_missing_destination_parent_and_same_path() {
+        let server = setup();
+        assert_eq!(put(&server, "/a.txt", "alpha").await, StatusCode::CREATED);
+
+        let no_dest = server
+            .handle(
+                Request::builder()
+                    .method("COPY")
+                    .uri("/a.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(no_dest.status(), StatusCode::BAD_REQUEST);
+
+        assert_eq!(
+            copy(&server, "/a.txt", "/missing/b.txt", None, None).await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            copy(&server, "/a.txt", "/a.txt", None, None).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_destination_absolute_url() {
+        let server = setup();
+        assert_eq!(put(&server, "/a.txt", "alpha").await, StatusCode::CREATED);
+        assert_eq!(
+            copy(
+                &server,
+                "/a.txt",
+                "http://example.com/copied.txt",
+                None,
+                None
+            )
+            .await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            resp_to_string(get(&server, "/copied.txt").await).await,
+            "alpha"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_collection_depth_infinity_and_zero() {
+        let server = setup();
+        assert_eq!(mkcol(&server, "/src").await, StatusCode::CREATED);
+        assert_eq!(mkcol(&server, "/src/sub").await, StatusCode::CREATED);
+        assert_eq!(put(&server, "/src/a.txt", "a").await, StatusCode::CREATED);
+        assert_eq!(
+            put(&server, "/src/sub/b.txt", "b").await,
+            StatusCode::CREATED
+        );
+
+        assert_eq!(
+            copy(&server, "/src", "/dst", None, None).await,
+            StatusCode::CREATED
+        );
+        assert_eq!(resp_to_string(get(&server, "/src/a.txt").await).await, "a");
+        assert_eq!(resp_to_string(get(&server, "/dst/a.txt").await).await, "a");
+        assert_eq!(
+            resp_to_string(get(&server, "/dst/sub/b.txt").await).await,
+            "b"
+        );
+
+        assert_eq!(
+            copy(&server, "/src", "/shallow", None, Some("0")).await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            get(&server, "/shallow/").await.status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            get(&server, "/shallow/a.txt").await.status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_depth_one_and_move_depth_zero_are_bad_request() {
+        let server = setup();
+        assert_eq!(mkcol(&server, "/src").await, StatusCode::CREATED);
+        assert_eq!(
+            copy(&server, "/src", "/dst", None, Some("1")).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            move_(&server, "/src", "/dst", None, Some("0")).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn move_file_and_collection() {
+        let server = setup();
+        assert_eq!(put(&server, "/a.txt", "alpha").await, StatusCode::CREATED);
+        assert_eq!(
+            move_(&server, "/a.txt", "/b.txt", None, None).await,
+            StatusCode::CREATED
+        );
+        assert_eq!(get(&server, "/a.txt").await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp_to_string(get(&server, "/b.txt").await).await, "alpha");
+
+        assert_eq!(put(&server, "/c.txt", "gamma").await, StatusCode::CREATED);
+        assert_eq!(
+            move_(&server, "/b.txt", "/c.txt", Some("F"), None).await,
+            StatusCode::PRECONDITION_FAILED
+        );
+        assert_eq!(
+            move_(&server, "/b.txt", "/c.txt", Some("T"), None).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(get(&server, "/b.txt").await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp_to_string(get(&server, "/c.txt").await).await, "alpha");
+
+        assert_eq!(mkcol(&server, "/from").await, StatusCode::CREATED);
+        assert_eq!(mkcol(&server, "/from/sub").await, StatusCode::CREATED);
+        assert_eq!(put(&server, "/from/a.txt", "a").await, StatusCode::CREATED);
+        assert_eq!(
+            put(&server, "/from/sub/b.txt", "b").await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            move_(&server, "/from", "/to", None, None).await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            get(&server, "/from/a.txt").await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(resp_to_string(get(&server, "/to/a.txt").await).await, "a");
+        assert_eq!(
+            resp_to_string(get(&server, "/to/sub/b.txt").await).await,
+            "b"
+        );
+    }
+}
