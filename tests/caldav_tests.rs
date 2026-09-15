@@ -457,8 +457,11 @@ END:VCALENDAR"
             "calendar collection should advertise calendar-query: {body_str}"
         );
         assert!(body_str.contains("calendar-multiget"));
+        assert!(
+            body_str.contains("free-busy-query"),
+            "calendar collection should advertise free-busy-query: {body_str}"
+        );
         assert!(!body_str.contains("addressbook-query"));
-        assert!(!body_str.contains("free-busy-query"));
     }
 
     #[tokio::test]
@@ -1118,6 +1121,28 @@ END:VCALENDAR"#;
     async fn test_freebusy_query_not_implemented() {
         let server = setup_caldav_server2().await;
 
+        let ics_data = create_ics_data("test-event-1", "Test Event");
+        put_ics_data(&server, ics_data, "/calendars/my-calendar/event.ics").await;
+
+        let transparent = r#"BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//Test//EN
+BEGIN:VEVENT
+UID:transparent-1
+DTSTART:20240101T140000Z
+DTEND:20240101T150000Z
+SUMMARY:Transparent
+TRANSP:TRANSPARENT
+END:VEVENT
+END:VCALENDAR"#
+            .to_string();
+        put_ics_data(
+            &server,
+            transparent,
+            "/calendars/my-calendar/transparent.ics",
+        )
+        .await;
+
         let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
 <C:free-busy-query xmlns:C="urn:ietf:params:xml:ns:caldav">
   <C:time-range start="20240101T000000Z" end="20240201T000000Z"/>
@@ -1130,7 +1155,41 @@ END:VCALENDAR"#;
             .unwrap();
 
         let resp = server.handle(req).await;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.contains("text/calendar"),
+            "content-type: {content_type}"
+        );
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("BEGIN:VFREEBUSY"),
+            "expected VFREEBUSY: {body_str}"
+        );
+        assert!(
+            body_str.contains("FREEBUSY:20240101T120000Z/20240101T130000Z"),
+            "expected busy period covering the opaque event: {body_str}"
+        );
+        assert!(
+            !body_str.contains("20240101T140000Z"),
+            "TRANSPARENT event must not appear: {body_str}"
+        );
+
+        let missing_range = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:free-busy-query xmlns:C="urn:ietf:params:xml:ns:caldav">
+</C:free-busy-query>"#;
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/calendars/my-calendar")
+            .body(Body::from(missing_range.to_string()))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

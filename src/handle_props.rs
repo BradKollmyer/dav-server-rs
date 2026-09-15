@@ -994,6 +994,7 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                             ns.put("C".to_string(), NS_CALDAV_URI.to_string());
                             children.push(supported_report_elem("C", "calendar-query"));
                             children.push(supported_report_elem("C", "calendar-multiget"));
+                            children.push(supported_report_elem("C", "free-busy-query"));
                         }
 
                         #[cfg(feature = "carddav")]

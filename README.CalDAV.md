@@ -17,7 +17,7 @@ The CalDAV implementation in dav-server includes:
 
 - **Calendar Collections**: Immediate children of `/calendars` (`/calendars/<name>`), each containing `.ics` files
 - **MKCALENDAR Method**: Create new calendar collection
-- **REPORT Method**: Implemented subset of `calendar-query` and `calendar-multiget` (see below)
+- **REPORT Method**: Implemented subset of `calendar-query`, `calendar-multiget`, and `free-busy-query` (see below)
 - **CalDAV Properties**: Calendar-specific WebDAV properties (`max-resource-size` is 1MB)
 - **Time Range Queries**: Filter events by date/time ranges
 - **Component Filtering**: Nested `comp-filter` by calendar component types (VEVENT, VTODO, etc.)
@@ -190,7 +190,7 @@ The CalDAV implementation has been tested with:
 Current limitations include:
 
 - Partial RFC 4791 coverage: `calendar-query` / `calendar-multiget` are an implemented subset (nested `comp-filter`, `prop-filter` `text-match`/`time-range`/`param-filter`, required filter, href confinement)
-- `free-busy-query` returns `501 Not Implemented`
+- `free-busy-query` returns VFREEBUSY busy periods from overlapping opaque VEVENT (and VFREEBUSY FREEBUSY); RRULE is not expanded
 - Calendar identity is `/calendars/<name>` (immediate children of `/calendars` only)
 - `max-resource-size` is 1MB
 - PUT or PATCH of invalid iCalendar data into a calendar collection is 403 (`validate_calendar_data`); a failed partial write is restored or removed

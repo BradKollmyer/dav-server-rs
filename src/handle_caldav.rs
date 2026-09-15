@@ -14,6 +14,7 @@ use crate::{DavInner, DavResult};
 
 use crate::async_stream::AsyncStream;
 use crate::caldav::*;
+use crate::davheaders;
 use crate::davpath::DavPath;
 use crate::handle_props::PropWriter;
 
@@ -538,8 +539,54 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             .await
     }
 
-    async fn handle_freebusy_query(&self, _: &DavPath, _: TimeRange) -> DavResult<Response<Body>> {
-        Err(DavError::StatusClose(StatusCode::NOT_IMPLEMENTED))
+    async fn handle_freebusy_query(
+        &self,
+        path: &DavPath,
+        time_range: TimeRange,
+    ) -> DavResult<Response<Body>> {
+        let Some((range_start, range_end)) = parse_freebusy_bounds(&time_range) else {
+            return Err(DavError::StatusClose(StatusCode::BAD_REQUEST));
+        };
+
+        let stream = self
+            .fs
+            .read_dir(path, ReadDirMeta::Data, &self.credentials)
+            .await?;
+        let mut busy = Vec::new();
+
+        let items: Vec<_> = stream.collect().await;
+        for item in items {
+            let Ok(dirent) = item else { continue };
+            let mut item_path = path.clone();
+            item_path.push_segment(&dirent.name());
+
+            if let Ok(mut file) = self
+                .fs
+                .open(&item_path, OpenOptions::read(), &self.credentials)
+                .await
+                && let Ok(metadata) = file.metadata().await
+                && metadata.len() <= DEFAULT_MAX_RESOURCE_SIZE
+                && let Ok(data) = file.read_bytes(metadata.len() as usize).await
+                && is_calendar_data(&data)
+            {
+                let content = String::from_utf8_lossy(&data);
+                if let Ok(calendar) = validate_calendar_data(&content) {
+                    busy.extend(calendar_busy_intervals(&calendar, range_start, range_end));
+                }
+            }
+        }
+
+        let busy = merge_busy_intervals(busy);
+        let ics = freebusy_calendar(range_start, range_end, &busy);
+        let ics_len = ics.len() as u64;
+
+        let mut resp = Response::new(Body::from(ics));
+        *resp.status_mut() = StatusCode::OK;
+        resp.headers_mut()
+            .typed_insert(davheaders::ContentType("text/calendar".to_owned()));
+        resp.headers_mut()
+            .typed_insert(headers::ContentLength(ics_len));
+        Ok(resp)
     }
 
     fn matches_query(&self, content: &str, query: &CalendarQuery) -> bool {

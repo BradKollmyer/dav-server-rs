@@ -121,7 +121,6 @@ for RFC 4918 basic / copymove / props / locks / http.
 
 Partial RFC 4791 / RFC 6352. Remaining:
 
-- `free-busy-query` is `501`
 - no scheduling (iTIP / iMIP)
 - limited `calendar-user-principal` / no sharing
 - no recurrence expansion in `calendar-query`

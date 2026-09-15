@@ -55,7 +55,7 @@
 //! - Nested `comp-filter` evaluation, plus `prop-filter` (`text-match`, `time-range`, `param-filter`)
 //! - Calendar multiget (REPORT `calendar-multiget`; hrefs must be in the collection)
 //! - CalDAV properties (`supported-calendar-component-set`, `max-resource-size` 1MB, etc.)
-//! - `free-busy-query` returns `501 Not Implemented`
+//! - `free-busy-query` (VFREEBUSY from overlapping opaque VEVENT; RRULE not expanded)
 //!
 //! PUT or PATCH of invalid iCalendar data into a calendar collection is 403
 //! (`validate_calendar_data`). A failed partial write is restored or removed.
@@ -125,12 +125,12 @@
 //! This adds a partial CalDAV implementation:
 //! - `MKCALENDAR` for calendar collections at `/calendars/<name>` (immediate children only)
 //! - `REPORT` subset: `calendar-query` (required `CALDAV:filter`, nested `comp-filter`,
-//!   `prop-filter` with `text-match`/`time-range`/`param-filter`) and `calendar-multiget` (hrefs confined to the collection)
+//!   `prop-filter` with `text-match`/`time-range`/`param-filter`), `calendar-multiget` (hrefs confined to the collection),
+//!   and `free-busy-query` (opaque overlapping VEVENT busy time; RRULE not expanded)
 //! - CalDAV-specific properties (`max-resource-size` 1MB) and resource types
 //!
-//! `free-busy-query` returns `501 Not Implemented`. PUT or PATCH into a
-//! calendar collection runs `validate_calendar_data` and returns 403 on
-//! failure (partial writes are restored or removed).
+//! PUT or PATCH into a calendar collection runs `validate_calendar_data`
+//! and returns 403 on failure (partial writes are restored or removed).
 //!
 //! Enable `carddav` the same way for MKADDRESSBOOK, addressbook-query, and
 //! addressbook-multiget. PUT or PATCH into an addressbook collection runs
