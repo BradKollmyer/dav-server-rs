@@ -55,6 +55,7 @@ impl DavLockSystem for MemLs {
         deep: bool,
     ) -> LsFuture<'_, Result<DavLock, DavLock>> {
         let inner = &mut *self.0.lock().unwrap();
+        prune_expired_locks(&mut inner.tree);
 
         // any locks in the path?
         let rc = check_locks_to_path(&inner.tree, path, None, true, &Vec::new(), shared);
@@ -93,6 +94,7 @@ impl DavLockSystem for MemLs {
 
     fn unlock(&'_ self, path: &DavPath, token: &str) -> LsFuture<'_, Result<(), ()>> {
         let inner = &mut *self.0.lock().unwrap();
+        prune_expired_locks(&mut inner.tree);
         let node_id = match lookup_lock(&inner.tree, path, token) {
             None => {
                 trace!("unlock: {token} not found at {path}");
@@ -120,6 +122,7 @@ impl DavLockSystem for MemLs {
     ) -> LsFuture<'_, Result<DavLock, ()>> {
         trace!("refresh lock {token}");
         let inner = &mut *self.0.lock().unwrap();
+        prune_expired_locks(&mut inner.tree);
         let node_id = match lookup_lock(&inner.tree, path, token) {
             None => {
                 trace!("lock not found");
@@ -144,7 +147,8 @@ impl DavLockSystem for MemLs {
         deep: bool,
         submitted_tokens: &[String],
     ) -> LsFuture<'_, Result<(), DavLock>> {
-        let inner = &*self.0.lock().unwrap();
+        let inner = &mut *self.0.lock().unwrap();
+        prune_expired_locks(&mut inner.tree);
         let _st = submitted_tokens;
         let rc = check_locks_to_path(
             &inner.tree,
@@ -178,7 +182,8 @@ impl DavLockSystem for MemLs {
     }
 
     fn discover(&'_ self, path: &DavPath) -> LsFuture<'_, Vec<DavLock>> {
-        let inner = &*self.0.lock().unwrap();
+        let inner = &mut *self.0.lock().unwrap();
+        prune_expired_locks(&mut inner.tree);
         future::ready(list_locks(&inner.tree, path)).boxed()
     }
 
@@ -188,6 +193,33 @@ impl DavLockSystem for MemLs {
             inner.tree.delete_subtree(node_id).ok();
         }
         future::ready(Ok(())).boxed()
+    }
+}
+
+// Drop locks whose timeout has elapsed so they cannot block new operations.
+fn prune_expired_locks(tree: &mut Tree) {
+    prune_expired_at(tree, tree::ROOT_ID, SystemTime::now());
+}
+
+fn prune_expired_at(tree: &mut Tree, node_id: u64, now: SystemTime) {
+    let children: Vec<u64> = match tree.get_children(node_id) {
+        Ok(children) => children.map(|(_, id)| id).collect(),
+        Err(_) => return,
+    };
+    for child_id in children {
+        prune_expired_at(tree, child_id, now);
+    }
+
+    let empty = match tree.get_node_mut(node_id) {
+        Ok(node) => {
+            node.retain(|lock| !lock.timeout_at.is_some_and(|t| t <= now));
+            node.is_empty()
+        }
+        Err(_) => return,
+    };
+    if empty {
+        // Same as unlock of the last lock: drop empty non-root nodes (root is kept).
+        tree.delete_node(node_id).ok();
     }
 }
 
@@ -397,4 +429,70 @@ fn get_child(tree: &Tree, node_id: u64, seg: &[u8]) -> FsResult<u64> {
         return Ok(node_id);
     }
     tree.get_child(node_id, seg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::davpath::DavPath;
+    use futures_util::FutureExt;
+    use std::thread;
+    use std::time::Duration;
+
+    fn path() -> DavPath {
+        DavPath::new("/file").unwrap()
+    }
+
+    fn ready<T>(fut: impl std::future::Future<Output = T>) -> T {
+        fut.now_or_never()
+            .expect("MemLs futures complete immediately")
+    }
+
+    #[test]
+    fn expired_exclusive_lock_does_not_block_check_or_lock() {
+        let ls = MemLs::new();
+        let p = path();
+        ready(ls.lock(&p, None, None, Some(Duration::from_millis(1)), false, false)).unwrap();
+        thread::sleep(Duration::from_millis(50));
+
+        assert!(ready(ls.check(&p, None, true, false, &[])).is_ok());
+        assert!(
+            ready(ls.lock(&p, None, None, Some(Duration::from_secs(60)), false, false)).is_ok()
+        );
+    }
+
+    #[test]
+    fn discover_omits_expired_locks() {
+        let ls = MemLs::new();
+        let p = path();
+        ready(ls.lock(&p, None, None, Some(Duration::from_millis(1)), false, false)).unwrap();
+        thread::sleep(Duration::from_millis(50));
+
+        assert!(ready(ls.discover(&p)).is_empty());
+    }
+
+    #[test]
+    fn unlock_of_expired_token_is_err() {
+        let ls = MemLs::new();
+        let p = path();
+        let lock =
+            ready(ls.lock(&p, None, None, Some(Duration::from_millis(1)), false, false)).unwrap();
+        thread::sleep(Duration::from_millis(50));
+
+        assert!(ready(ls.unlock(&p, &lock.token)).is_err());
+    }
+
+    #[test]
+    fn infinite_timeout_never_expires() {
+        let ls = MemLs::new();
+        let p = path();
+        let lock = ready(ls.lock(&p, None, None, None, false, false)).unwrap();
+        thread::sleep(Duration::from_millis(50));
+
+        assert!(ready(ls.check(&p, None, true, false, &[])).is_err());
+        let found = ready(ls.discover(&p));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].token, lock.token);
+        assert!(ready(ls.lock(&p, None, None, None, false, false)).is_err());
+    }
 }
