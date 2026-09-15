@@ -382,6 +382,40 @@ mod oc_timestamp_tests {
     }
 }
 
+#[cfg(feature = "memfs")]
+mod put_collection_tests {
+    use dav_server::{DavHandler, body::Body, fakels::FakeLs, memfs::MemFs};
+    use http::{Request, StatusCode};
+
+    fn setup() -> DavHandler {
+        DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .build_handler()
+    }
+
+    #[tokio::test]
+    async fn put_on_collection_is_method_not_allowed() {
+        let server = setup();
+
+        let req = Request::builder()
+            .method("MKCOL")
+            .uri("/dir")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/dir")
+            .body(Body::from("nope"))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+}
+
 #[cfg(feature = "localfs")]
 mod oc_timestamp_localfs_tests {
     use dav_server::{DavHandler, body::Body, localfs::LocalFs};

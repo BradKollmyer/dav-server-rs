@@ -104,6 +104,12 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         let path = self.path(req);
         self.ensure_visible(&path).await?;
         let meta = self.fs.metadata(&path, &self.credentials).await;
+        // RFC 4918 9.7.2: PUT/PATCH on a collection is 405.
+        if let Ok(ref m) = meta
+            && m.is_dir()
+        {
+            return Err(DavError::StatusClose(SC::METHOD_NOT_ALLOWED));
+        }
 
         // close connection on error.
         let mut res = Response::new(Body::empty());
