@@ -305,66 +305,87 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         let mut body = pin!(body);
 
-        // loop, read body, write to file.
-        let mut total = 0u64;
         #[cfg(any(feature = "caldav", feature = "carddav"))]
         let mut typed_body = (!do_range && typed_collection.is_some()).then(Vec::new);
 
-        while let Some(data) = body.frame().await {
-            let data_frame = data.map_err(|e| to_ioerror(e))?;
+        // loop, read body, write to file.
+        let written: DavResult<()> = async {
+            let mut total = 0u64;
+            while let Some(data) = body.frame().await {
+                let data_frame = data.map_err(|e| to_ioerror(e))?;
 
-            let Ok(mut buf) = data_frame.into_data() else {
-                continue;
-            };
-
-            total += buf.remaining() as u64;
-            #[cfg(any(feature = "caldav", feature = "carddav"))]
-            if let Some(max) = size_limit {
-                let resulting =
-                    resulting_resource_size(do_range, append, existing_len, start, total);
-                if resulting > max {
-                    return Err(DavError::StatusClose(SC::FORBIDDEN));
-                }
-            }
-            // consistency check.
-            if have_count && total > count {
-                break;
-            }
-            // The `Buf` might actually be a `Bytes`.
-            let b = {
-                let b: &mut dyn std::any::Any = &mut buf;
-                b.downcast_mut::<Bytes>()
-            };
-            if let Some(bytes) = b {
-                let bytes = std::mem::replace(bytes, Bytes::new());
-                #[cfg(any(feature = "caldav", feature = "carddav"))]
-                if let Some(ref mut collected) = typed_body {
-                    collected.extend_from_slice(&bytes);
-                }
-                file.write_bytes(bytes).await?;
-            } else {
-                #[cfg(any(feature = "caldav", feature = "carddav"))]
-                if let Some(ref mut collected) = typed_body {
-                    let bytes = buf.copy_to_bytes(buf.remaining());
-                    collected.extend_from_slice(&bytes);
-                    file.write_bytes(bytes).await?;
+                let Ok(mut buf) = data_frame.into_data() else {
                     continue;
+                };
+
+                total += buf.remaining() as u64;
+                #[cfg(any(feature = "caldav", feature = "carddav"))]
+                if let Some(max) = size_limit {
+                    let resulting =
+                        resulting_resource_size(do_range, append, existing_len, start, total);
+                    if resulting > max {
+                        return Err(DavError::StatusClose(SC::FORBIDDEN));
+                    }
                 }
-                file.write_buf(Box::new(buf)).await?;
+                // consistency check.
+                if have_count && total > count {
+                    break;
+                }
+                // The `Buf` might actually be a `Bytes`.
+                let b = {
+                    let b: &mut dyn std::any::Any = &mut buf;
+                    b.downcast_mut::<Bytes>()
+                };
+                if let Some(bytes) = b {
+                    let bytes = std::mem::replace(bytes, Bytes::new());
+                    #[cfg(any(feature = "caldav", feature = "carddav"))]
+                    if let Some(ref mut collected) = typed_body {
+                        collected.extend_from_slice(&bytes);
+                    }
+                    file.write_bytes(bytes).await?;
+                } else {
+                    #[cfg(any(feature = "caldav", feature = "carddav"))]
+                    if let Some(ref mut collected) = typed_body {
+                        let bytes = buf.copy_to_bytes(buf.remaining());
+                        collected.extend_from_slice(&bytes);
+                        file.write_bytes(bytes).await?;
+                        continue;
+                    }
+                    file.write_buf(Box::new(buf)).await?;
+                }
             }
-        }
-        file.flush().await?;
-        drop(file);
+            file.flush().await?;
+            drop(file);
 
-        if have_count && total > count {
-            error!("PUT file: sender is sending more bytes than expected");
-            return Err(DavError::StatusClose(SC::BAD_REQUEST));
-        }
+            if have_count && total > count {
+                error!("PUT file: sender is sending more bytes than expected");
+                return Err(DavError::StatusClose(SC::BAD_REQUEST));
+            }
 
-        if have_count && total < count {
-            error!("PUT file: premature EOF on input");
-            return Err(DavError::StatusClose(SC::BAD_REQUEST));
+            if have_count && total < count {
+                error!("PUT file: premature EOF on input");
+                return Err(DavError::StatusClose(SC::BAD_REQUEST));
+            }
+            Ok(())
         }
+        .await;
+
+        // A failed write into a calendar/addressbook collection must not leave
+        // a half-written object behind: restore the previous PATCH target, or
+        // remove a newly created resource.
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        if let Err(e) = written {
+            if typed_collection.is_some() {
+                if do_range {
+                    self.restore_or_remove_typed(&path, restore_bytes).await;
+                } else if meta.is_err() {
+                    let _ = self.fs.remove_file(&path, &self.credentials).await;
+                }
+            }
+            return Err(e);
+        }
+        #[cfg(not(any(feature = "caldav", feature = "carddav")))]
+        written?;
 
         // RFC 4791 5.3.2.1 / RFC 6352 6.3.2: invalid calendar/address data is 403.
         // Full PUT is checked from the collected body; PATCH / partial PUT is
