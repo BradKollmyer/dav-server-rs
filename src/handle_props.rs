@@ -512,7 +512,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             Some(NS_DAV_URI) => match prop.name.as_str() {
                 "getcontentlanguage" | "displayname" => {
                     if can_deadprop {
-                        StatusCode::OK
+                        StatusCode::CONTINUE
                     } else {
                         StatusCode::FORBIDDEN
                     }

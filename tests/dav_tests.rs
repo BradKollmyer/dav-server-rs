@@ -1548,6 +1548,102 @@ mod propfind_propstat_tests {
             "allprop missing dead prop in {body}"
         );
     }
+
+    #[tokio::test]
+    async fn proppatch_remove_displayname() {
+        let server = setup();
+        put_notes(&server).await;
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PROPPATCH")
+                    .uri("/notes.txt")
+                    .body(Body::from(
+                        r#"<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:">
+  <D:set>
+    <D:prop>
+      <D:displayname>My Notes</D:displayname>
+    </D:prop>
+  </D:set>
+</D:propertyupdate>"#,
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/notes.txt")
+            .header("Depth", "0")
+            .body(Body::from(
+                r#"<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:displayname/>
+  </D:prop>
+</D:propfind>"#,
+            ))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body = resp_to_string(resp).await;
+        assert!(
+            body.contains("My Notes"),
+            "displayname missing after set: {body}"
+        );
+        assert!(
+            body.contains("200 OK"),
+            "displayname set should be 200: {body}"
+        );
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PROPPATCH")
+                    .uri("/notes.txt")
+                    .body(Body::from(
+                        r#"<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:">
+  <D:remove>
+    <D:prop>
+      <D:displayname/>
+    </D:prop>
+  </D:remove>
+</D:propertyupdate>"#,
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/notes.txt")
+            .header("Depth", "0")
+            .body(Body::from(
+                r#"<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:displayname/>
+  </D:prop>
+</D:propfind>"#,
+            ))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body = resp_to_string(resp).await;
+        assert!(
+            !body.contains("My Notes"),
+            "displayname still present after remove: {body}"
+        );
+        assert!(
+            body.contains("404"),
+            "removed displayname should be 404: {body}"
+        );
+    }
 }
 
 #[cfg(feature = "memfs")]
