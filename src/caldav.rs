@@ -448,13 +448,17 @@ pub(crate) fn parse_caldav_date_time(s: &str) -> Option<DateTime<Utc>> {
     None
 }
 
+/// Resolve a DTSTART/DTEND/DUE value to UTC. A TZID naming an Olson zone is
+/// converted through chrono-tz; a TZID that is not an Olson name (a custom
+/// VTIMEZONE id) or a local time that does not exist or is ambiguous at a DST
+/// transition falls back to reading the wall-clock time as UTC.
 #[cfg(feature = "caldav")]
 fn to_utc(dt: &DatePerhapsTime) -> DateTime<Utc> {
     match dt {
         DatePerhapsTime::DateTime(CalendarDateTime::Utc(dt)) => *dt,
         DatePerhapsTime::DateTime(CalendarDateTime::Floating(ndt)) => ndt.and_utc(),
-        DatePerhapsTime::DateTime(CalendarDateTime::WithTimezone { date_time, .. }) => {
-            date_time.and_utc()
+        DatePerhapsTime::DateTime(cdt @ CalendarDateTime::WithTimezone { date_time, .. }) => {
+            cdt.try_into_utc().unwrap_or_else(|| date_time.and_utc())
         }
         DatePerhapsTime::Date(date) => date.and_time(NaiveTime::MIN).and_utc(),
     }
@@ -924,6 +928,77 @@ mod tests {
         let utc = vevent_ics("UTC", "20240615T120000Z", "20240615T130000Z");
         assert!(calendar_matches_query(with_tz, &query));
         assert!(!calendar_matches_query(&utc, &query));
+    }
+
+    fn tzid_vevent_ics(tzid: &str, dtstart: &str, dtend: &str) -> String {
+        format!(
+            "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:1\nDTSTART;TZID={tzid}:{dtstart}\nDTEND;TZID={tzid}:{dtend}\nSUMMARY:Zoned\nEND:VEVENT\nEND:VCALENDAR"
+        )
+    }
+
+    fn vevent_time_range_query(start: &str, end: &str) -> CalendarQuery {
+        let mut filter = vevent_filter();
+        filter.time_range = Some(TimeRange {
+            start: Some(start.into()),
+            end: Some(end.into()),
+        });
+        vcalendar_with(filter)
+    }
+
+    #[test]
+    fn tzid_date_time_is_converted_to_utc_in_time_range() {
+        // EDT (UTC-4): 12:00-13:00 local is 16:00Z-17:00Z.
+        let summer = tzid_vevent_ics("America/New_York", "20240615T120000", "20240615T130000");
+        assert!(calendar_matches_query(
+            &summer,
+            &vevent_time_range_query("20240615T160000Z", "20240615T170000Z")
+        ));
+        assert!(!calendar_matches_query(
+            &summer,
+            &vevent_time_range_query("20240615T110000Z", "20240615T123000Z")
+        ));
+
+        // EST (UTC-5): 12:00-13:00 local is 17:00Z-18:00Z.
+        let winter = tzid_vevent_ics("America/New_York", "20240115T120000", "20240115T130000");
+        assert!(calendar_matches_query(
+            &winter,
+            &vevent_time_range_query("20240115T170000Z", "20240115T180000Z")
+        ));
+        assert!(!calendar_matches_query(
+            &winter,
+            &vevent_time_range_query("20240115T160000Z", "20240115T170000Z")
+        ));
+    }
+
+    #[test]
+    fn unknown_tzid_falls_back_to_wall_clock_as_utc() {
+        let ics = tzid_vevent_ics("Custom/Office", "20240615T120000", "20240615T130000");
+        assert!(calendar_matches_query(
+            &ics,
+            &vevent_time_range_query("20240615T120000Z", "20240615T130000Z")
+        ));
+        assert!(!calendar_matches_query(
+            &ics,
+            &vevent_time_range_query("20240615T160000Z", "20240615T170000Z")
+        ));
+    }
+
+    #[test]
+    fn tzid_vevent_busy_interval_is_in_utc() {
+        let start = parse_caldav_date_time("20240601T000000Z").unwrap();
+        let end = parse_caldav_date_time("20240701T000000Z").unwrap();
+        let cal = parse_ics(&tzid_vevent_ics(
+            "America/New_York",
+            "20240615T120000",
+            "20240615T130000",
+        ));
+        assert_eq!(
+            calendar_busy_intervals(&cal, start, end),
+            vec![(
+                parse_caldav_date_time("20240615T160000Z").unwrap(),
+                parse_caldav_date_time("20240615T170000Z").unwrap(),
+            )]
+        );
     }
 
     fn dav_path(p: &str) -> DavPath {

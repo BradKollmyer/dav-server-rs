@@ -197,7 +197,7 @@ Current limitations include:
 - No scheduling support (iTIP/iMIP)
 - Limited calendar-user-principal support
 - No calendar sharing or ACL support
-- Basic time zone handling
+- Basic time zone handling: `TZID` values that are Olson names (for example `America/New_York`) are converted to UTC for `time-range` and `free-busy-query` matching; custom `VTIMEZONE` ids are not interpreted and their wall-clock time is read as UTC
 - No recurring event expansion in queries
 - `calendar-multiget` hrefs outside the collection are treated as missing
 
