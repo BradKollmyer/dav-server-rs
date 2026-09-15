@@ -266,8 +266,11 @@ impl DavFileSystem for MemFs {
         async move {
             let tree = &mut *self.tree.lock().unwrap();
 
-            // source must exist.
+            // source must exist and be a file; collections are copied by the handler.
             let snode_id = tree.lookup(from.as_bytes())?;
+            if tree.get_node(snode_id)?.is_dir() {
+                return Err(FsError::Forbidden);
+            }
 
             // make sure destination exists, create if needed.
             {
@@ -277,13 +280,11 @@ impl DavFileSystem for MemFs {
             }
             let dnode_id = tree.lookup(to.as_bytes())?;
 
-            // copy.
-            let mut data = (*tree.get_node_mut(snode_id)?).clone();
-            match data {
-                MemFsNode::Dir(ref mut d) => d.crtime = SystemTime::now(),
-                MemFsNode::File(ref mut f) => f.crtime = SystemTime::now(),
-            }
-            *tree.get_node_mut(dnode_id)? = data;
+            let src = tree.get_node(snode_id)?.as_file()?.clone();
+            let dest = tree.get_node_mut(dnode_id)?.as_file_mut()?;
+            dest.props = src.props;
+            dest.data = src.data;
+            dest.mtime = SystemTime::now();
 
             Ok(())
         }
@@ -771,5 +772,26 @@ mod tests {
         let file = DavFileSystem::metadata(&*fs, &path("/file")).await.unwrap();
         assert!(!file.is_dir());
         assert_eq!(file.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn copy_of_directory_is_error() {
+        let fs = MemFs::new();
+        DavFileSystem::create_dir(&*fs, &path("/dir"))
+            .await
+            .unwrap();
+        create_file(&fs, "/dir/child", b"x").await;
+
+        let err = DavFileSystem::copy(&*fs, &path("/dir"), &path("/dest"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, FsError::Forbidden | FsError::NotImplemented),
+            "{err:?}"
+        );
+
+        let src = DavFileSystem::metadata(&*fs, &path("/dir")).await.unwrap();
+        assert!(src.is_dir());
+        assert!(DavFileSystem::metadata(&*fs, &path("/dest")).await.is_err());
     }
 }
