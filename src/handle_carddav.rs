@@ -384,9 +384,11 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         let mut missing_hrefs: Vec<String> = Vec::new();
 
         for href in &hrefs {
-            // RFC 6352 6.3: hrefs must be address-object resources in this collection.
+            // RFC 6352 8.7: hrefs must be address object resources in this
+            // collection, or the request URI itself when the REPORT is
+            // addressed to an address object resource.
             if let Ok(item_path) = DavPath::from_str_and_prefix(href, &self.prefix)
-                && item_path.is_in_collection(path)
+                && (item_path.is_in_collection(path) || item_path == *path)
                 && let Ok(mut file) = self
                     .fs
                     .open(&item_path, OpenOptions::read(), &self.credentials)

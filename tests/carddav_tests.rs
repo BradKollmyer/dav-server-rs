@@ -892,6 +892,67 @@ END:VCARD"#;
         );
     }
 
+    #[tokio::test]
+    async fn test_addressbook_multiget_on_object_resource() {
+        let server = setup_carddav_server().await;
+
+        let req = Request::builder()
+            .method("MKADDRESSBOOK")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::empty())
+            .unwrap();
+        let _ = server.handle(req).await;
+
+        let vcard = r#"BEGIN:VCARD
+VERSION:3.0
+UID:self-contact@example.com
+FN:Self Contact
+N:Contact;Self;;;
+END:VCARD"#;
+
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/addressbooks/my-contacts/contact.vcf")
+            .header("Content-Type", "text/vcard")
+            .body(Body::from(vcard))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // RFC 6352 8.7: the REPORT may be addressed to the address object
+        // resource itself, listing its own href.
+        let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<CARD:addressbook-multiget xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
+  <D:prop>
+    <CARD:address-data/>
+  </D:prop>
+  <D:href>/addressbooks/my-contacts/contact.vcf</D:href>
+</CARD:addressbook-multiget>"#;
+
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/addressbooks/my-contacts/contact.vcf")
+            .body(Body::from(report_body))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("HTTP/1.1 200 OK"),
+            "object href must be 200: {body_str}"
+        );
+        assert!(
+            !body_str.contains("404 Not Found"),
+            "object href must not be 404: {body_str}"
+        );
+        assert!(
+            body_str.contains("Self Contact"),
+            "address-data missing: {body_str}"
+        );
+    }
+
     #[test]
     fn test_is_vcard_data() {
         let valid_vcard = b"BEGIN:VCARD\nVERSION:3.0\nFN:Test\nEND:VCARD\n";

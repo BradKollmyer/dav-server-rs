@@ -1080,6 +1080,47 @@ END:VCALENDAR"
         );
     }
 
+    #[tokio::test]
+    async fn test_calendar_multiget_on_object_resource() {
+        let server = setup_caldav_server2().await;
+        let ics_data = create_ics_data("self-event", "Self Event");
+        let resp = put_ics_data(&server, ics_data, "/calendars/my-calendar/event.ics").await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // RFC 4791 7.9: the REPORT may be addressed to the calendar object
+        // resource itself, listing its own href.
+        let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <D:href>/calendars/my-calendar/event.ics</D:href>
+</C:calendar-multiget>"#;
+
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/calendars/my-calendar/event.ics")
+            .body(Body::from(report_body))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("HTTP/1.1 200 OK"),
+            "object href must be 200: {body_str}"
+        );
+        assert!(
+            !body_str.contains("404 Not Found"),
+            "object href must not be 404: {body_str}"
+        );
+        assert!(
+            body_str.contains("Self Event"),
+            "calendar-data missing: {body_str}"
+        );
+    }
+
     #[test]
     fn test_is_calendar_data() {
         let valid_ical = b"BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR\n";

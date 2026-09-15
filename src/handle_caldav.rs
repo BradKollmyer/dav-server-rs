@@ -514,9 +514,11 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         let mut missing_hrefs: Vec<String> = Vec::new();
 
         for href in &hrefs {
-            // RFC 4791 7.9: hrefs must be calendar object resources in this collection.
+            // RFC 4791 7.9: hrefs must be calendar object resources in this
+            // collection, or the request URI itself when the REPORT is
+            // addressed to a calendar object resource.
             if let Ok(item_path) = DavPath::from_str_and_prefix(href, &self.prefix)
-                && item_path.is_in_collection(path)
+                && (item_path.is_in_collection(path) || item_path == *path)
                 && let Ok(mut file) = self
                     .fs
                     .open(&item_path, OpenOptions::read(), &self.credentials)
