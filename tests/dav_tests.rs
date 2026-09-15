@@ -3912,3 +3912,81 @@ mod etag_compare_tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
 }
+
+#[cfg(feature = "memfs")]
+mod strip_prefix_tests {
+    use dav_server::{DavHandler, body::Body, fakels::FakeLs, memfs::MemFs};
+    use http::{Request, StatusCode};
+
+    async fn resp_to_string(mut resp: http::Response<Body>) -> String {
+        use futures_util::StreamExt;
+
+        let mut data = Vec::new();
+        let body = resp.body_mut();
+
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => data.extend_from_slice(&bytes),
+                Err(e) => panic!("Error reading body stream: {}", e),
+            }
+        }
+
+        String::from_utf8(data).unwrap_or_else(|_| "".to_string())
+    }
+
+    async fn get(server: &DavHandler, uri: &str) -> http::Response<Body> {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        server.handle(req).await
+    }
+
+    #[tokio::test]
+    async fn prefix_without_trailing_slash_requires_segment_boundary() {
+        let server = DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .strip_prefix("/dav")
+            .build_handler();
+
+        let req = Request::builder()
+            .method("MKCOL")
+            .uri("/dav/foo")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(server.handle(req).await.status(), StatusCode::CREATED);
+
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/dav/foo/bar")
+            .body(Body::from("secret"))
+            .unwrap();
+        assert!(server.handle(req).await.status().is_success());
+
+        let resp = get(&server, "/dav/foo/bar").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp_to_string(resp).await, "secret");
+
+        // A path that merely starts with the prefix bytes must be rejected
+        // exactly like any other path outside the prefix, not aliased to
+        // /dav/foo/bar.
+        let outside = get(&server, "/other/foo/bar").await.status();
+        assert!(!outside.is_success(), "{outside}");
+
+        let resp = get(&server, "/davxfoo/bar").await;
+        assert_eq!(resp.status(), outside);
+        assert_ne!(resp_to_string(resp).await, "secret");
+
+        // Formerly reached an empty stripped path and panicked in COPY.
+        let req = Request::builder()
+            .method("COPY")
+            .uri("/dav/foo/bar")
+            .header("Destination", "/davx")
+            .body(Body::empty())
+            .unwrap();
+        let status = server.handle(req).await.status();
+        assert!(!status.is_success(), "{status}");
+    }
+}

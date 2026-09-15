@@ -197,6 +197,8 @@ impl DavPath {
             }
         } else if path.len() == pfxlen {
             path.push(b'/');
+        } else if path[pfxlen] != b'/' {
+            return Err(ParseError::PrefixMismatch);
         }
         self.pfxlen = Some(pfxlen);
         Ok(())
@@ -487,5 +489,21 @@ mod tests {
         p.push_segment(&[0xff, b'x']);
         let _ = p.as_pathbuf();
         let _ = p.as_rel_ospath();
+    }
+
+    #[test]
+    fn set_prefix_requires_segment_boundary() {
+        for path in ["/davx", "/davxfoo/bar"] {
+            let mut p = DavPath::new(path).unwrap();
+            assert!(
+                matches!(p.set_prefix("/dav"), Err(ParseError::PrefixMismatch)),
+                "{path} must not match prefix /dav"
+            );
+        }
+        for (path, stripped) in [("/dav", "/"), ("/dav/", "/"), ("/dav/a", "/a")] {
+            let mut p = DavPath::new(path).unwrap();
+            p.set_prefix("/dav").unwrap();
+            assert_eq!(p.as_bytes(), stripped.as_bytes(), "{path}");
+        }
     }
 }
