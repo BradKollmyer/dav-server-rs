@@ -177,10 +177,68 @@ END:VCALENDAR"
         let body_str = resp_to_string(resp).await;
         println!("{}", body_str);
         assert!(body_str.contains("resourcetype"));
+        assert!(
+            body_str.contains("<C:calendar"),
+            "MKCALENDAR collection must have calendar resourcetype: {body_str}"
+        );
         assert!(body_str.contains("getetag"));
         assert!(body_str.contains("supported-report-set"));
         assert!(body_str.contains("supported-calendar-component-set"));
         assert!(body_str.contains("supported-calendar-data"));
+    }
+
+    #[tokio::test]
+    async fn test_nested_path_is_not_calendar_collection() {
+        let server = setup_caldav_server2().await;
+
+        let req = Request::builder()
+            .method("MKCOL")
+            .uri("/calendars/my-calendar/nested")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <D:resourcetype/>
+  </D:prop>
+</D:propfind>"#;
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/calendars/my-calendar/nested")
+            .header("Depth", "0")
+            .body(Body::from(propfind_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("collection"),
+            "nested dir should remain a collection: {body_str}"
+        );
+        assert!(
+            !body_str.contains("<C:calendar"),
+            "nested dir must not be a calendar collection: {body_str}"
+        );
+
+        let ics_data = create_ics_data("test-event-1", "Test Event");
+        put_ics_data(&server, ics_data, "/calendars/my-calendar/event.ics").await;
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/calendars/my-calendar/event.ics")
+            .header("Depth", "0")
+            .body(Body::from(propfind_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            !body_str.contains("<C:calendar"),
+            "calendar object must not be a calendar collection: {body_str}"
+        );
     }
 
     #[tokio::test]

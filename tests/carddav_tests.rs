@@ -114,7 +114,57 @@ mod carddav_tests {
 
         // Check that response contains CardDAV properties
         let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("<CARD:addressbook"),
+            "MKADDRESSBOOK collection must have addressbook resourcetype: {body_str}"
+        );
         assert!(body_str.contains("supported-address-data"));
+    }
+
+    #[tokio::test]
+    async fn test_nested_path_is_not_addressbook_collection() {
+        let server = setup_carddav_server();
+
+        let req = Request::builder()
+            .method("MKADDRESSBOOK")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let req = Request::builder()
+            .method("MKCOL")
+            .uri("/addressbooks/my-contacts/nested")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
+  <D:prop>
+    <D:resourcetype/>
+  </D:prop>
+</D:propfind>"#;
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/addressbooks/my-contacts/nested")
+            .header("Depth", "0")
+            .body(Body::from(propfind_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("collection"),
+            "nested dir should remain a collection: {body_str}"
+        );
+        assert!(
+            !body_str.contains("<CARD:addressbook"),
+            "nested dir must not be an address book collection: {body_str}"
+        );
     }
 
     #[tokio::test]

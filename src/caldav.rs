@@ -199,11 +199,23 @@ pub fn create_calendar_home_set(prefix: &str, path: &str) -> Element {
     elem
 }
 
-/// Check if a path is within the default CalDAV directory. Expects path without prefix.
+/// Immediate child of `/calendars` (`/calendars/<name>` or `/calendars/<name>/`).
+/// The home itself and nested paths are not calendar collections (RFC 4791 4.2).
+/// Compares prefix-stripped URL bytes, not PathBuf display.
 pub(crate) fn is_path_in_caldav_directory(dav_path: &DavPath) -> bool {
-    let path_string = dav_path.to_string();
-    path_string.len() > DEFAULT_CALDAV_DIRECTORY_ENDSLASH.len()
-        && path_string.starts_with(DEFAULT_CALDAV_DIRECTORY_ENDSLASH)
+    is_immediate_child_of(
+        dav_path.as_bytes(),
+        DEFAULT_CALDAV_DIRECTORY_ENDSLASH.as_bytes(),
+    )
+}
+
+fn is_immediate_child_of(path: &[u8], parent_slash: &[u8]) -> bool {
+    let path = match path.strip_suffix(b"/") {
+        Some(rest) if !rest.is_empty() => rest,
+        _ => path,
+    };
+    path.strip_prefix(parent_slash)
+        .is_some_and(|name| !name.is_empty() && !name.contains(&b'/'))
 }
 
 /// Check if a resource is a calendar collection based on resource type
@@ -595,6 +607,49 @@ mod tests {
             "BEGIN:VCALENDAR\nNOT VALID\nEND:VCALENDAR",
             &query
         ));
+    }
+
+    fn dav_path(p: &str) -> DavPath {
+        DavPath::new(p).unwrap()
+    }
+
+    #[test]
+    fn immediate_calendar_child_is_collection() {
+        assert!(is_path_in_caldav_directory(&dav_path(
+            "/calendars/my-calendar"
+        )));
+        assert!(is_path_in_caldav_directory(&dav_path(
+            "/calendars/my-calendar/"
+        )));
+    }
+
+    #[test]
+    fn nested_and_home_paths_are_not_calendars() {
+        for p in [
+            "/calendars",
+            "/calendars/",
+            "/calendars/my-calendar/event.ics",
+            "/calendars/my-calendar/nested",
+            "/calendars/my-calendar/nested/",
+            "/other",
+            "/",
+        ] {
+            assert!(
+                !is_path_in_caldav_directory(&dav_path(p)),
+                "{p} must not be a calendar collection"
+            );
+        }
+    }
+
+    #[test]
+    fn calendar_path_uses_prefix_stripped_bytes() {
+        let mut path = dav_path("/dav/calendars/my-calendar");
+        path.set_prefix("/dav").unwrap();
+        assert!(is_path_in_caldav_directory(&path));
+
+        let mut nested = dav_path("/dav/calendars/my-calendar/event.ics");
+        nested.set_prefix("/dav").unwrap();
+        assert!(!is_path_in_caldav_directory(&nested));
     }
 }
 
