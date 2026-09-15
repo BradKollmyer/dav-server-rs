@@ -1,4 +1,4 @@
-#[cfg(all(target_os = "linux", feature = "localfs"))]
+#[cfg(all(unix, feature = "localfs"))]
 mod dav_tests {
     use dav_server::{DavHandler, DavOptionHide, body::Body, fakels::FakeLs, localfs::LocalFs};
     use http::{Request, StatusCode};
@@ -948,6 +948,12 @@ mod if_state_token_tests {
   <D:locktype><D:write/></D:locktype>
 </D:lockinfo>"#;
 
+    const SHARED_LOCKINFO: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<D:lockinfo xmlns:D="DAV:">
+  <D:lockscope><D:shared/></D:lockscope>
+  <D:locktype><D:write/></D:locktype>
+</D:lockinfo>"#;
+
     fn setup() -> DavHandler {
         DavHandler::builder()
             .filesystem(MemFs::new())
@@ -970,6 +976,15 @@ mod if_state_token_tests {
     }
 
     async fn lock(server: &DavHandler, uri: &str, depth: &str) -> (StatusCode, Option<String>) {
+        lock_xml(server, uri, depth, LOCKINFO).await
+    }
+
+    async fn lock_xml(
+        server: &DavHandler,
+        uri: &str,
+        depth: &str,
+        xml: &str,
+    ) -> (StatusCode, Option<String>) {
         let resp = server
             .handle(
                 Request::builder()
@@ -977,7 +992,7 @@ mod if_state_token_tests {
                     .uri(uri)
                     .header("Depth", depth)
                     .header("Content-Type", "application/xml")
-                    .body(Body::from(LOCKINFO))
+                    .body(Body::from(xml))
                     .unwrap(),
             )
             .await;
@@ -1310,6 +1325,42 @@ mod if_state_token_tests {
             )
             .await;
         assert_eq!(copy_ok.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn shared_locks_stack_and_block_exclusive() {
+        let server = setup();
+        assert_eq!(
+            put(&server, "/file.txt", "v1", None).await,
+            StatusCode::CREATED
+        );
+
+        let (status, token1) = lock_xml(&server, "/file.txt", "0", SHARED_LOCKINFO).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(token1.is_some());
+
+        let (status, token2) = lock_xml(&server, "/file.txt", "0", SHARED_LOCKINFO).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(token2.is_some());
+        assert_ne!(token1, token2);
+
+        let (status, _) = lock(&server, "/file.txt", "0").await;
+        assert_eq!(status, StatusCode::LOCKED);
+
+        assert_eq!(
+            put(&server, "/file.txt", "v2", None).await,
+            StatusCode::LOCKED
+        );
+        assert_eq!(
+            put(
+                &server,
+                "/file.txt",
+                "v2",
+                Some(&format!("({})", token1.unwrap()))
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
     }
 }
 
@@ -3349,5 +3400,134 @@ mod conditional_put_tests {
             StatusCode::NO_CONTENT
         );
         assert_eq!(get_body(&server, "/file.txt").await, "v2");
+    }
+}
+
+#[cfg(feature = "memfs")]
+mod options_method_tests {
+    use dav_server::{DavHandler, DavMethodSet, body::Body, fakels::FakeLs, memfs::MemFs};
+    use http::{Request, StatusCode};
+
+    fn setup() -> DavHandler {
+        DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .build_handler()
+    }
+
+    fn allow(resp: &http::Response<dav_server::body::Body>) -> String {
+        resp.headers()
+            .get("allow")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn has(allow: &str, method: &str) -> bool {
+        allow.split(',').any(|m| m == method)
+    }
+
+    async fn options(server: &DavHandler, uri: &str) -> http::Response<dav_server::body::Body> {
+        server
+            .handle(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn options_dav_advertises_sabredav_partialupdate() {
+        let server = setup();
+        let resp = options(&server, "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let dav = resp
+            .headers()
+            .get("DAV")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(dav.contains("sabredav-partialupdate"), "DAV header: {dav}");
+        assert!(
+            dav.contains("1,2,3") || dav.contains("1, 2, 3") || dav.starts_with("1,"),
+            "{dav}"
+        );
+    }
+
+    #[tokio::test]
+    async fn options_allow_differs_for_unmapped_file_and_root() {
+        let server = setup();
+
+        let unmapped = options(&server, "/nope.txt").await;
+        assert_eq!(unmapped.status(), StatusCode::OK);
+        let a = allow(&unmapped);
+        assert!(has(&a, "OPTIONS"), "{a}");
+        assert!(has(&a, "MKCOL"), "{a}");
+        assert!(has(&a, "PUT"), "{a}");
+        assert!(has(&a, "LOCK"), "{a}");
+        assert!(!has(&a, "GET"), "{a}");
+        assert!(!has(&a, "DELETE"), "{a}");
+
+        let put = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/notes.txt")
+                    .body(Body::from("hi"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(put.status(), StatusCode::CREATED);
+
+        let file = options(&server, "/notes.txt").await;
+        assert_eq!(file.status(), StatusCode::OK);
+        let a = allow(&file);
+        assert!(has(&a, "GET"), "{a}");
+        assert!(has(&a, "HEAD"), "{a}");
+        assert!(has(&a, "PUT"), "{a}");
+        assert!(has(&a, "PATCH"), "{a}");
+        assert!(has(&a, "DELETE"), "{a}");
+        assert!(has(&a, "MOVE"), "{a}");
+        assert!(!has(&a, "MKCOL"), "{a}");
+
+        let root = options(&server, "/").await;
+        assert_eq!(root.status(), StatusCode::OK);
+        let a = allow(&root);
+        assert!(has(&a, "OPTIONS"), "{a}");
+        assert!(has(&a, "PROPFIND"), "{a}");
+        assert!(has(&a, "COPY"), "{a}");
+        assert!(!has(&a, "GET"), "{a}");
+        assert!(!has(&a, "DELETE"), "{a}");
+        assert!(!has(&a, "MOVE"), "{a}");
+    }
+
+    #[tokio::test]
+    async fn methods_restrict_put_and_options_allow() {
+        let server = DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .methods(DavMethodSet::HTTP_RO)
+            .build_handler();
+
+        let put = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/notes.txt")
+                    .body(Body::from("hi"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(put.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        let resp = options(&server, "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let a = allow(&resp);
+        assert!(has(&a, "OPTIONS"), "{a}");
+        assert!(!has(&a, "PUT"), "{a}");
+        assert!(!has(&a, "LOCK"), "{a}");
+        assert!(!has(&a, "PROPFIND"), "{a}");
     }
 }
