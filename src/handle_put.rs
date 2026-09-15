@@ -403,25 +403,15 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         // checked from the resulting resource and restored on failure.
         #[cfg(any(feature = "caldav", feature = "carddav"))]
         if let Some(kind) = typed_collection {
-            if do_range {
+            let body = if do_range {
                 let cap = size_limit.unwrap_or(u64::MAX);
-                match self.read_resource_bytes(&path, cap).await {
-                    Ok(body) if meta.is_ok() => {
-                        if !Self::typed_body_valid(kind, &body) {
-                            self.restore_or_remove_typed(&path, restore_bytes).await;
-                            return Err(DavError::StatusClose(SC::FORBIDDEN));
-                        }
-                    }
-                    Ok(body) => {
-                        self.reject_invalid_typed_put(&path, kind, &body).await?;
-                    }
-                    Err(_) => {
-                        self.restore_or_remove_typed(&path, restore_bytes).await;
-                        return Err(DavError::StatusClose(SC::FORBIDDEN));
-                    }
-                }
-            } else if let Some(body) = typed_body.as_deref() {
-                self.reject_invalid_typed_put(&path, kind, body).await?;
+                self.read_resource_bytes(&path, cap).await.ok()
+            } else {
+                typed_body.take()
+            };
+            if !body.is_some_and(|body| Self::typed_body_valid(kind, &body)) {
+                self.restore_or_remove_typed(&path, restore_bytes).await;
+                return Err(DavError::StatusClose(SC::FORBIDDEN));
             }
         }
 
@@ -479,21 +469,6 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             },
             Err(_) => false,
         }
-    }
-
-    /// RFC 4791 5.3.2.1 / RFC 6352 6.3.2: invalid object data is 403; drop the resource.
-    #[cfg(any(feature = "caldav", feature = "carddav"))]
-    async fn reject_invalid_typed_put(
-        &self,
-        path: &DavPath,
-        kind: TypedCollection,
-        body: &[u8],
-    ) -> DavResult<()> {
-        if Self::typed_body_valid(kind, body) {
-            return Ok(());
-        }
-        let _ = self.fs.remove_file(path, &self.credentials).await;
-        Err(DavError::StatusClose(SC::FORBIDDEN))
     }
 
     #[cfg(any(feature = "caldav", feature = "carddav"))]
