@@ -2400,3 +2400,74 @@ mod get_delete_copymove_tests {
         );
     }
 }
+
+#[cfg(feature = "memfs")]
+mod memfs_path_tests {
+    use dav_server::{DavHandler, body::Body, fakels::FakeLs, memfs::MemFs};
+    use futures_util::StreamExt;
+    use http::{Request, StatusCode};
+
+    fn setup() -> DavHandler {
+        DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .build_handler()
+    }
+
+    async fn resp_to_string(mut resp: http::Response<Body>) -> String {
+        let mut data = Vec::new();
+        let body = resp.body_mut();
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => data.extend_from_slice(&bytes),
+                Err(e) => panic!("Error reading body stream: {}", e),
+            }
+        }
+        String::from_utf8(data).unwrap_or_else(|_| "".to_string())
+    }
+
+    #[tokio::test]
+    async fn get_through_file_is_forbidden_or_not_found() {
+        let server = setup();
+
+        let put = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/file")
+                    .body(Body::from("hello"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(put.status(), StatusCode::CREATED);
+
+        let get = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/file/anything")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert!(
+            get.status() == StatusCode::FORBIDDEN || get.status() == StatusCode::NOT_FOUND,
+            "{}",
+            get.status()
+        );
+        let body = resp_to_string(get).await;
+        assert_ne!(body, "hello");
+
+        let file_get = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/file")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(file_get.status(), StatusCode::OK);
+        assert_eq!(resp_to_string(file_get).await, "hello");
+    }
+}

@@ -626,16 +626,11 @@ trait TreeExt {
 impl TreeExt for Tree {
     fn lookup_segs(&self, segs: Vec<&[u8]>) -> FsResult<u64> {
         let mut node_id = tree::ROOT_ID;
-        let mut is_dir = true;
         for seg in segs.into_iter() {
-            if !is_dir {
+            if !self.get_node(node_id)?.is_dir() {
                 return Err(FsError::Forbidden);
             }
-            if self.get_node(node_id)?.is_dir() {
-                node_id = self.get_child(node_id, seg)?;
-            } else {
-                is_dir = false;
-            }
+            node_id = self.get_child(node_id, seg)?;
         }
         Ok(node_id)
     }
@@ -670,4 +665,42 @@ fn file_name(path: &[u8]) -> Vec<u8> {
         .rfind(|s| !s.is_empty())
         .unwrap_or(b"")
         .to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::davpath::DavPath;
+
+    fn path(p: &str) -> DavPath {
+        DavPath::new(p).unwrap()
+    }
+
+    async fn create_file(fs: &MemFs, p: &str, data: &[u8]) {
+        let mut oo = OpenOptions::write();
+        oo.create = true;
+        oo.truncate = true;
+        let mut f = DavFileSystem::open(fs, &path(p), oo).await.unwrap();
+        if !data.is_empty() {
+            f.write_bytes(Bytes::copy_from_slice(data)).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn lookup_through_file_is_forbidden() {
+        let fs = MemFs::new();
+        create_file(&fs, "/file", b"hello").await;
+
+        let err = DavFileSystem::metadata(&*fs, &path("/file/anything"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, FsError::Forbidden | FsError::NotFound),
+            "{err:?}"
+        );
+
+        let meta = DavFileSystem::metadata(&*fs, &path("/file")).await.unwrap();
+        assert!(!meta.is_dir());
+        assert_eq!(meta.len(), 5);
+    }
 }
