@@ -1259,7 +1259,9 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
             let res = self
                 .build_prop(p, path, &*meta, &mut qc, do_content)
                 .await?;
-            if res.status == StatusCode::OK {
+            // Specific `prop` requests must report 404 (and other non-OK)
+            // for named properties that are not present.
+            if self.name == "prop" || res.status == StatusCode::OK {
                 add_sc_elem(&mut props, res.status, res.element);
             }
         }
@@ -1289,9 +1291,11 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
             }
         }
 
-        // and list props of the filesystem driver if it supports DAV properties
-        if self.fs.have_props(path, &self.credentials).await
-            && let Ok(v) = self.fs.get_props(path, true, &self.credentials).await
+        // Dead properties: allprop includes values, propname includes names.
+        // Named props in a specific `prop` request are fetched via build_prop.
+        if self.name != "prop"
+            && self.fs.have_props(path, &self.credentials).await
+            && let Ok(v) = self.fs.get_props(path, do_content, &self.credentials).await
         {
             v.into_iter()
                 .map(davprop_to_element)

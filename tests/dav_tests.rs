@@ -1379,3 +1379,173 @@ mod propfind_depth_tests {
         );
     }
 }
+
+#[cfg(all(feature = "memfs", feature = "proppatch"))]
+mod propfind_propstat_tests {
+    use dav_server::{DavHandler, body::Body, fakels::FakeLs, memfs::MemFs};
+    use http::{Request, StatusCode};
+
+    fn setup() -> DavHandler {
+        DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .build_handler()
+    }
+
+    async fn resp_to_string(mut resp: http::Response<Body>) -> String {
+        use futures_util::StreamExt;
+
+        let mut data = Vec::new();
+        let body = resp.body_mut();
+
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => data.extend_from_slice(&bytes),
+                Err(e) => panic!("Error reading body stream: {}", e),
+            }
+        }
+
+        String::from_utf8(data).unwrap_or_else(|_| "".to_string())
+    }
+
+    async fn put_notes(server: &DavHandler) {
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/notes.txt")
+                    .body(Body::from("hello"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn propfind_specific_prop_reports_404_for_missing_live_prop() {
+        let server = setup();
+        put_notes(&server).await;
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/notes.txt")
+            .header("Depth", "0")
+            .body(Body::from(
+                r#"<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:displayname/>
+    <D:no-such-prop/>
+  </D:prop>
+</D:propfind>"#,
+            ))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body = resp_to_string(resp).await;
+        assert!(
+            body.contains("no-such-prop"),
+            "missing property name absent from {body}"
+        );
+        assert!(
+            body.contains("404"),
+            "expected 404 propstat for no-such-prop in {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn propfind_specific_prop_does_not_leak_unsolicited_dead_props() {
+        let server = setup();
+        put_notes(&server).await;
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PROPPATCH")
+                    .uri("/notes.txt")
+                    .body(Body::from(
+                        r#"<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:X="http://example.com/ns">
+  <D:set>
+    <D:prop>
+      <X:dead-color>blue</X:dead-color>
+    </D:prop>
+  </D:set>
+</D:propertyupdate>"#,
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/notes.txt")
+            .header("Depth", "0")
+            .body(Body::from(
+                r#"<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:getcontentlength/>
+  </D:prop>
+</D:propfind>"#,
+            ))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body = resp_to_string(resp).await;
+        assert!(
+            body.contains("getcontentlength"),
+            "expected getcontentlength in {body}"
+        );
+        assert!(
+            !body.contains("dead-color"),
+            "specific prop leaked unsolicited dead prop: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn propfind_allprop_includes_dead_props() {
+        let server = setup();
+        put_notes(&server).await;
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PROPPATCH")
+                    .uri("/notes.txt")
+                    .body(Body::from(
+                        r#"<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:X="http://example.com/ns">
+  <D:set>
+    <D:prop>
+      <X:dead-color>blue</X:dead-color>
+    </D:prop>
+  </D:set>
+</D:propertyupdate>"#,
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/notes.txt")
+            .header("Depth", "0")
+            .body(Body::from(
+                r#"<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:allprop/>
+</D:propfind>"#,
+            ))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body = resp_to_string(resp).await;
+        assert!(
+            body.contains("dead-color"),
+            "allprop missing dead prop in {body}"
+        );
+    }
+}
