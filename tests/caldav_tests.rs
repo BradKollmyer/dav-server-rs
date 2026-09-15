@@ -1601,6 +1601,186 @@ END:VCALENDAR"#
             "MKCALENDAR on a prop-only filesystem must still be a calendar: {body_str}"
         );
     }
+
+    /// Largest chunk a `ShortReadFile` hands back per `read_bytes` call.
+    const SHORT_READ_MAX: usize = 7;
+
+    /// MemFs wrapper whose files return at most `SHORT_READ_MAX` bytes per
+    /// `read_bytes` call, like a `Read::read` that short-reads.
+    #[derive(Clone)]
+    struct ShortReadFs(dav_server::memfs::MemFs);
+
+    impl ShortReadFs {
+        fn new() -> Box<Self> {
+            Box::new(Self(*dav_server::memfs::MemFs::new()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ShortReadFile(Box<dyn dav_server::fs::DavFile>);
+
+    impl dav_server::fs::DavFile for ShortReadFile {
+        fn metadata(
+            &'_ mut self,
+        ) -> dav_server::fs::FsFuture<'_, Box<dyn dav_server::fs::DavMetaData>> {
+            self.0.metadata()
+        }
+
+        fn write_buf(
+            &'_ mut self,
+            buf: Box<dyn bytes::Buf + Send>,
+        ) -> dav_server::fs::FsFuture<'_, ()> {
+            self.0.write_buf(buf)
+        }
+
+        fn write_bytes(&'_ mut self, buf: bytes::Bytes) -> dav_server::fs::FsFuture<'_, ()> {
+            self.0.write_bytes(buf)
+        }
+
+        fn read_bytes(&'_ mut self, count: usize) -> dav_server::fs::FsFuture<'_, bytes::Bytes> {
+            self.0.read_bytes(count.min(SHORT_READ_MAX))
+        }
+
+        fn seek(&'_ mut self, pos: std::io::SeekFrom) -> dav_server::fs::FsFuture<'_, u64> {
+            self.0.seek(pos)
+        }
+
+        fn flush(&'_ mut self) -> dav_server::fs::FsFuture<'_, ()> {
+            self.0.flush()
+        }
+    }
+
+    impl dav_server::fs::DavFileSystem for ShortReadFs {
+        fn open<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+            options: dav_server::fs::OpenOptions,
+        ) -> dav_server::fs::FsFuture<'a, Box<dyn dav_server::fs::DavFile>> {
+            use futures_util::TryFutureExt;
+            Box::pin(
+                self.0.open(path, options).map_ok(|file| {
+                    Box::new(ShortReadFile(file)) as Box<dyn dav_server::fs::DavFile>
+                }),
+            )
+        }
+
+        fn read_dir<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+            meta: dav_server::fs::ReadDirMeta,
+        ) -> dav_server::fs::FsFuture<
+            'a,
+            dav_server::fs::FsStream<Box<dyn dav_server::fs::DavDirEntry>>,
+        > {
+            self.0.read_dir(path, meta)
+        }
+
+        fn metadata<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+        ) -> dav_server::fs::FsFuture<'a, Box<dyn dav_server::fs::DavMetaData>> {
+            self.0.metadata(path)
+        }
+
+        fn symlink_metadata<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+        ) -> dav_server::fs::FsFuture<'a, Box<dyn dav_server::fs::DavMetaData>> {
+            self.0.symlink_metadata(path)
+        }
+
+        fn create_dir<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+        ) -> dav_server::fs::FsFuture<'a, ()> {
+            self.0.create_dir(path)
+        }
+
+        fn remove_file<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+        ) -> dav_server::fs::FsFuture<'a, ()> {
+            self.0.remove_file(path)
+        }
+
+        fn mark_calendar<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+        ) -> dav_server::fs::FsFuture<'a, ()> {
+            self.0.mark_calendar(path)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_calendar_reports_tolerate_short_reads() {
+        let server = DavHandler::builder()
+            .filesystem(ShortReadFs::new())
+            .locksystem(FakeLs::new())
+            .build_handler();
+        mkcol(&server, "/calendars").await;
+
+        let req = Request::builder()
+            .method("MKCALENDAR")
+            .uri("/calendars/short-cal")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let ics_data = create_ics_data("short-read-event", "Short Read Event");
+        assert!(ics_data.len() > SHORT_READ_MAX);
+        let resp = put_ics_data(&server, ics_data, "/calendars/short-cal/event.ics").await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <D:href>/calendars/short-cal/event.ics</D:href>
+</C:calendar-multiget>"#;
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/calendars/short-cal")
+            .body(Body::from(report_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            !body_str.contains("404"),
+            "multiget must not 404 a resource on a short-reading filesystem: {body_str}"
+        );
+        assert!(
+            body_str.contains("Short Read Event") && body_str.contains("END:VCALENDAR"),
+            "multiget must return the whole object: {body_str}"
+        );
+
+        let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT"/>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>"#;
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/calendars/short-cal")
+            .header("Depth", "1")
+            .body(Body::from(report_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("Short Read Event") && body_str.contains("END:VCALENDAR"),
+            "calendar-query must return the whole object: {body_str}"
+        );
+    }
 }
 
 #[cfg(all(not(feature = "caldav"), feature = "memfs"))]

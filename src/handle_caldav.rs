@@ -504,7 +504,8 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                         .await
                         && let Ok(metadata) = file.metadata().await
                         && metadata.len() <= DEFAULT_MAX_RESOURCE_SIZE
-                        && let Ok(data) = file.read_bytes(metadata.len() as usize).await
+                        && let Ok(data) =
+                            read_file_to_end(file.as_mut(), metadata.len() as usize).await
                         && is_calendar_data(&data)
                     {
                         let content = String::from_utf8_lossy(&data);
@@ -545,7 +546,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     .await
                 && let Ok(metadata) = file.metadata().await
                 && metadata.len() <= DEFAULT_MAX_RESOURCE_SIZE
-                && let Ok(data) = file.read_bytes(metadata.len() as usize).await
+                && let Ok(data) = read_file_to_end(file.as_mut(), metadata.len() as usize).await
                 && is_calendar_data(&data)
             {
                 let etag = metadata.etag().unwrap_or_default().to_string();
@@ -588,7 +589,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                 .await
                 && let Ok(metadata) = file.metadata().await
                 && metadata.len() <= DEFAULT_MAX_RESOURCE_SIZE
-                && let Ok(data) = file.read_bytes(metadata.len() as usize).await
+                && let Ok(data) = read_file_to_end(file.as_mut(), metadata.len() as usize).await
                 && is_calendar_data(&data)
             {
                 let content = String::from_utf8_lossy(&data);

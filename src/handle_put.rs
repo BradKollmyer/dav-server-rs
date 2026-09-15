@@ -471,8 +471,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             .open(path, OpenOptions::read(), &self.credentials)
             .await?;
         let n = file.metadata().await?.len().min(max) as usize;
-        let data = file.read_bytes(n).await?;
-        Ok(data.to_vec())
+        read_file_to_end(file.as_mut(), n).await
     }
 
     #[cfg(any(feature = "caldav", feature = "carddav"))]

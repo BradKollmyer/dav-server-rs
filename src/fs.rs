@@ -890,12 +890,33 @@ pub trait DavFile: Debug + Send + Sync {
     fn metadata(&'_ mut self) -> FsFuture<'_, Box<dyn DavMetaData>>;
     fn write_buf(&'_ mut self, buf: Box<dyn bytes::Buf + Send>) -> FsFuture<'_, ()>;
     fn write_bytes(&'_ mut self, buf: bytes::Bytes) -> FsFuture<'_, ()>;
+    /// Read up to `count` bytes from the current position.
+    ///
+    /// This has `std::io::Read::read` semantics: a successful call may return
+    /// fewer than `count` bytes (a short read) even before end of file, and
+    /// only an empty result means end of file. Callers that need the whole
+    /// range must loop.
     fn read_bytes(&'_ mut self, count: usize) -> FsFuture<'_, bytes::Bytes>;
     fn seek(&'_ mut self, pos: SeekFrom) -> FsFuture<'_, u64>;
     fn flush(&'_ mut self) -> FsFuture<'_, ()>;
     fn redirect_url(&'_ mut self) -> FsFuture<'_, Option<String>> {
         future::ready(Ok(None)).boxed()
     }
+}
+
+/// Read `len` bytes from `file`, looping over short reads until either `len`
+/// bytes have been collected or `read_bytes` returns an empty chunk (EOF).
+#[cfg(any(feature = "caldav", feature = "carddav"))]
+pub(crate) async fn read_file_to_end(file: &mut dyn DavFile, len: usize) -> FsResult<Vec<u8>> {
+    let mut data = Vec::with_capacity(len);
+    while data.len() < len {
+        let chunk = file.read_bytes(len - data.len()).await?;
+        if chunk.is_empty() {
+            break;
+        }
+        data.extend_from_slice(&chunk);
+    }
+    Ok(data)
 }
 
 /// File metadata. Basically type, length, and some timestamps.
