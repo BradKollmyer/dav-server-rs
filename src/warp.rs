@@ -30,12 +30,18 @@ pub fn dav_handler(handler: DavHandler) -> BoxedFilter<(impl Reply,)> {
     warp::method()
         .and(warp::path::full())
         .and(warp::path::tail())
+        .and(
+            warp::query::raw()
+                .map(Some)
+                .or_else(|_| async { Ok::<_, Infallible>((None,)) }),
+        )
         .and(warp::header::headers_cloned())
         .and(warp::body::stream())
         .and_then(
             move |method: Method,
                   path_full: FullPath,
                   path_tail: Tail,
+                  query: Option<String>,
                   headers: HeaderMap,
                   body| {
                 let handler = handler.clone();
@@ -43,7 +49,10 @@ pub fn dav_handler(handler: DavHandler) -> BoxedFilter<(impl Reply,)> {
                 async move {
                     // rebuild an http::Request struct.
                     let path_str = path_full.as_str();
-                    let uri = path_str.parse::<Uri>().unwrap();
+                    let uri = match query {
+                        Some(query) => format!("{path_str}?{query}").parse::<Uri>().unwrap(),
+                        None => path_str.parse::<Uri>().unwrap(),
+                    };
                     let mut builder = http::Request::builder().method(method.as_ref()).uri(uri);
                     for (k, v) in headers.iter() {
                         builder = builder.header(k.as_str(), v.as_ref());

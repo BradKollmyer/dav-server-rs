@@ -30,3 +30,24 @@ async fn put_and_get_through_warp() {
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.body(), "hello");
 }
+
+#[tokio::test]
+async fn get_with_query_string_hits_same_resource() {
+    let filter = dav_handler(handler());
+
+    let resp = warp::test::request()
+        .method("PUT")
+        .path("/notes.txt")
+        .body("hello")
+        .reply(&filter)
+        .await;
+    assert_eq!(resp.status(), 201);
+
+    let resp = warp::test::request()
+        .method("GET")
+        .path("/notes.txt?foo=1")
+        .reply(&filter)
+        .await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.body(), "hello");
+}
