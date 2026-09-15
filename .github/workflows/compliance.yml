@@ -1,0 +1,43 @@
+name: Litmus compliance
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compliance:
+    name: Compliance Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build sample litmus server
+        run: cargo build --example sample-litmus-server
+      - name: Run sample litmus server
+        run: |
+          ./target/debug/examples/sample-litmus-server --memfs --auth &
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 http://127.0.0.1:4918/ || true)
+            case "$code" in
+              [1-9][0-9][0-9]) echo "server up: $code"; exit 0 ;;
+            esac
+            sleep 1
+          done
+          echo "sample-litmus-server did not start"
+          exit 1
+      - name: Build litmus
+        run: |
+          curl -fsSL -o litmus-0.13.tar.gz https://notroj.github.io/litmus/litmus-0.13.tar.gz
+          tar xf litmus-0.13.tar.gz
+          cd litmus-0.13
+          ./configure
+          make
+      - name: Run litmus protocol compliance test
+        run: |
+          cd litmus-0.13
+          TESTS="http basic copymove locks props" HTDOCS=htdocs TESTROOT=. ./litmus http://127.0.0.1:4918/ someuser somepass
