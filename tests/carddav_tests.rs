@@ -82,6 +82,96 @@ mod carddav_tests {
     }
 
     #[tokio::test]
+    async fn test_mkaddressbook_missing_parent() {
+        let server = setup_carddav_server();
+
+        let req = Request::builder()
+            .method("MKADDRESSBOOK")
+            .uri("/addressbooks/missing-parent/contacts")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_mkaddressbook_invalid_body() {
+        let server = setup_carddav_server();
+
+        let req = Request::builder()
+            .method("MKADDRESSBOOK")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::from("not xml"))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let req = Request::builder()
+            .method("MKADDRESSBOOK")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::from(
+                r#"<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:"/>"#,
+            ))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_mkaddressbook_with_mkcol_xml() {
+        let server = setup_carddav_server();
+
+        let body = r#"<?xml version="1.0" encoding="utf-8"?>
+<D:mkcol xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
+  <D:set>
+    <D:prop>
+      <D:resourcetype>
+        <D:collection/>
+        <CARD:addressbook/>
+      </D:resourcetype>
+      <D:displayname>My Contacts</D:displayname>
+    </D:prop>
+  </D:set>
+</D:mkcol>"#;
+
+        let req = Request::builder()
+            .method("MKADDRESSBOOK")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::from(body))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        #[cfg(feature = "proppatch")]
+        {
+            let propfind = r#"<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:displayname/>
+  </D:prop>
+</D:propfind>"#;
+            let req = Request::builder()
+                .method("PROPFIND")
+                .uri("/addressbooks/my-contacts")
+                .header("Depth", "0")
+                .body(Body::from(propfind))
+                .unwrap();
+            let resp = server.handle(req).await;
+            assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+            let body_str = resp_to_string(resp).await;
+            assert!(
+                body_str.contains("My Contacts"),
+                "displayname missing in {body_str}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_addressbook_propfind() {
         let server = setup_carddav_server();
 

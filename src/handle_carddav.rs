@@ -1,5 +1,4 @@
 use futures_util::StreamExt;
-use headers::HeaderMapExt;
 use http::{Request, Response, StatusCode};
 use std::io::Cursor;
 use xml::reader::{EventReader, XmlEvent};
@@ -8,6 +7,7 @@ use xmltree::{Element, XMLNode};
 use crate::body::Body;
 use crate::errors::*;
 use crate::fs::*;
+use crate::xmltree_ext::ElementExt;
 use crate::{DavInner, DavResult};
 
 use crate::async_stream::AsyncStream;
@@ -50,27 +50,31 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         }
     }
 
-    /// Handle CardDAV MKADDRESSBOOK method
+    /// Handle CardDAV MKADDRESSBOOK method.
+    ///
+    /// RFC 6352 creates address books with extended MKCOL. MKADDRESSBOOK is a
+    /// compatibility alias with the same parent/If/lock/409/405 behaviour as MKCOL.
     pub(crate) async fn handle_mkaddressbook(
         &self,
         req: &Request<()>,
-        _body: &[u8],
+        body: &[u8],
     ) -> DavResult<Response<Body>> {
-        let path = self.path(req);
-
-        // Check if the collection already exists
-        if self.fs.metadata(&path, &self.credentials).await.is_ok() {
-            return Err(DavError::StatusClose(StatusCode::METHOD_NOT_ALLOWED));
-        }
-
-        // Create the addressbook collection
-        self.fs.create_dir(&path, &self.credentials).await?;
-
-        let mut resp = Response::new(Body::empty());
-        *resp.status_mut() = StatusCode::CREATED;
-        resp.headers_mut().typed_insert(headers::ContentLength(0));
-
+        let set_props = parse_mkcol_or_mkaddressbook_set_props(body)?;
+        let resp = self.handle_mkcol(req).await?;
+        self.apply_mkcol_set_props(&self.path(req), set_props).await;
         Ok(resp)
+    }
+
+    async fn apply_mkcol_set_props(&self, path: &DavPath, props: Vec<DavProp>) {
+        #[cfg(feature = "proppatch")]
+        if !props.is_empty() && self.fs.have_props(path, &self.credentials).await {
+            let patch = props.into_iter().map(|p| (true, p)).collect();
+            let _ = self.fs.patch_props(path, patch, &self.credentials).await;
+        }
+        #[cfg(not(feature = "proppatch"))]
+        {
+            let _ = (path, props);
+        }
     }
 
     fn parse_carddav_report_request(&self, body: &[u8]) -> DavResult<CardDavReportType> {
@@ -445,5 +449,48 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         }));
 
         Ok(resp)
+    }
+}
+
+/// Empty body: no props. Otherwise the root must be `mkcol` or `mkaddressbook`.
+fn parse_mkcol_or_mkaddressbook_set_props(body: &[u8]) -> DavResult<Vec<DavProp>> {
+    if body.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let tree = Element::parse2(Cursor::new(body))?;
+    if tree.name != "mkcol" && tree.name != "mkaddressbook" {
+        return Err(DavError::XmlParseError);
+    }
+
+    let mut props = Vec::new();
+    for set in tree.child_elems_iter() {
+        if set.name != "set" {
+            continue;
+        }
+        for prop_elem in set.child_elems_iter() {
+            if prop_elem.name != "prop" {
+                continue;
+            }
+            for n in prop_elem.child_elems_iter() {
+                if n.name == "resourcetype" {
+                    continue;
+                }
+                props.push(element_to_davprop_full(n));
+            }
+        }
+    }
+    Ok(props)
+}
+
+fn element_to_davprop_full(elem: &Element) -> DavProp {
+    let mut emitter = xml::writer::EventWriter::new(Cursor::new(Vec::new()));
+    elem.write_ev(&mut emitter).ok();
+    let xml = emitter.into_inner().into_inner();
+    DavProp {
+        name: elem.name.clone(),
+        prefix: elem.prefix.clone(),
+        namespace: elem.namespace.clone(),
+        xml: Some(xml),
     }
 }

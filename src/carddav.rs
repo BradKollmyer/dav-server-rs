@@ -121,8 +121,8 @@ pub fn create_addressbook_home_set(prefix: &str, path: &str) -> Element {
 }
 
 /// Immediate child of `/addressbooks` (`/addressbooks/<name>` or `/addressbooks/<name>/`).
-/// The home itself and nested paths are not address book collections (RFC 6352 5.2).
-/// Compares prefix-stripped URL bytes, not PathBuf display.
+/// Nested paths are not address books. `DAV:resourcetype` is not persisted, so MKCOL
+/// with `CARD:addressbook` outside this prefix is not an address book.
 pub(crate) fn is_path_in_carddav_directory(dav_path: &DavPath) -> bool {
     is_immediate_child_of(
         dav_path.as_bytes(),
