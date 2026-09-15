@@ -470,6 +470,58 @@ END:VCARD"#;
     }
 
     #[tokio::test]
+    async fn test_vcard_partial_put_invalid_restores() {
+        let server = setup_carddav_server().await;
+
+        let req = Request::builder()
+            .method("MKADDRESSBOOK")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert!(resp.status().is_success());
+
+        let vcard_data = r#"BEGIN:VCARD
+VERSION:3.0
+UID:test-contact-123@example.com
+FN:John Doe
+N:Doe;John;;;
+EMAIL:john.doe@example.com
+END:VCARD"#;
+
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/addressbooks/my-contacts/contact.vcf")
+            .header("Content-Type", "text/vcard")
+            .body(Body::from(vcard_data))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/addressbooks/my-contacts/contact.vcf")
+                    .header("Content-Range", "bytes 0-4/*")
+                    .header("Content-Length", "5")
+                    .body(Body::from("XXXXX"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/addressbooks/my-contacts/contact.vcf")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp_to_string(resp).await, vcard_data);
+    }
+
+    #[tokio::test]
     async fn test_addressbook_query_report() {
         let server = setup_carddav_server().await;
 

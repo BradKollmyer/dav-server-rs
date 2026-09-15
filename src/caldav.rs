@@ -244,8 +244,8 @@ pub fn is_calendar_data(content: &[u8]) -> bool {
 /// Validate iCalendar data using the icalendar crate
 ///
 /// This function validates that the content is a well-formed iCalendar object.
-/// Full PUT into a calendar collection applies this check and returns 403 on
-/// failure. Applications may also call it directly.
+/// PUT or PATCH into a calendar collection applies this check and returns 403
+/// on failure. Applications may also call it directly.
 ///
 /// # Example
 ///

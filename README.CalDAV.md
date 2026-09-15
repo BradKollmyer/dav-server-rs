@@ -193,7 +193,7 @@ Current limitations include:
 - `free-busy-query` returns `501 Not Implemented`
 - Calendar identity is `/calendars/<name>` (immediate children of `/calendars` only)
 - `max-resource-size` is 1MB
-- Full PUT of invalid iCalendar data into a calendar collection is 403 (`validate_calendar_data`); partial PUT/PATCH is not validated
+- PUT or PATCH of invalid iCalendar data into a calendar collection is 403 (`validate_calendar_data`); a failed partial write is restored or removed
 - No scheduling support (iTIP/iMIP)
 - Limited calendar-user-principal support
 - No calendar sharing or ACL support

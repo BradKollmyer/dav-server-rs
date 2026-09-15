@@ -125,8 +125,6 @@ Partial RFC 4791 / RFC 6352. Remaining:
 - no scheduling (iTIP / iMIP)
 - limited `calendar-user-principal` / no sharing
 - no recurrence expansion in `calendar-query`
-- partial PUT / PATCH into a calendar or addressbook is not validated
-  (full PUT of invalid iCalendar / vCard is 403)
 - calendar / addressbook identity is only immediate children of
   `/calendars` and `/addressbooks`
 - basic timezone handling

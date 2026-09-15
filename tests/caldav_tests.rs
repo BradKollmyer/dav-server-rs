@@ -497,6 +497,77 @@ END:VCALENDAR"
     }
 
     #[tokio::test]
+    async fn test_calendar_partial_put_invalid_restores() {
+        let server = setup_caldav_server2().await;
+        let ics_data = create_ics_data("test-event-1", "Test Event");
+        let resp = put_ics_data(
+            &server,
+            ics_data.clone(),
+            "/calendars/my-calendar/event.ics",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/calendars/my-calendar/event.ics")
+                    .header("Content-Range", "bytes 0-4/*")
+                    .header("Content-Length", "5")
+                    .body(Body::from("XXXXX"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/calendars/my-calendar/event.ics")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp_to_string(resp).await, ics_data);
+    }
+
+    #[tokio::test]
+    async fn test_calendar_patch_invalid_restores() {
+        let server = setup_caldav_server2().await;
+        let ics_data = create_ics_data("test-event-1", "Test Event");
+        let resp = put_ics_data(
+            &server,
+            ics_data.clone(),
+            "/calendars/my-calendar/event.ics",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/calendars/my-calendar/event.ics")
+                    .header("Content-Type", "application/x-sabredav-partialupdate")
+                    .header("X-Update-Range", "bytes=0-4")
+                    .header("Content-Length", "5")
+                    .body(Body::from("XXXXX"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/calendars/my-calendar/event.ics")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp_to_string(resp).await, ics_data);
+    }
+
+    #[tokio::test]
     async fn test_calendar_put_max_resource_size() {
         let server = setup_caldav_server2().await;
 
