@@ -2906,6 +2906,65 @@ mod get_delete_copymove_tests {
     }
 
     #[tokio::test]
+    async fn copy_move_into_own_descendant_or_ancestor_is_forbidden() {
+        let server = setup();
+        assert_eq!(mkcol(&server, "/a").await, StatusCode::CREATED);
+        assert_eq!(mkcol(&server, "/a/sub").await, StatusCode::CREATED);
+        assert_eq!(put(&server, "/a/f.txt", "top").await, StatusCode::CREATED);
+        assert_eq!(
+            put(&server, "/a/sub/g.txt", "inner").await,
+            StatusCode::CREATED
+        );
+
+        // MOVE a collection into its own descendant.
+        assert_eq!(
+            move_(&server, "/a/", "/a/sub/", None, None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            resp_to_string(get(&server, "/a/sub/g.txt").await).await,
+            "inner"
+        );
+        assert_eq!(resp_to_string(get(&server, "/a/f.txt").await).await, "top");
+
+        // MOVE a collection onto its own ancestor.
+        assert_eq!(
+            move_(&server, "/a/sub/", "/a/", None, None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            resp_to_string(get(&server, "/a/sub/g.txt").await).await,
+            "inner"
+        );
+        assert_eq!(resp_to_string(get(&server, "/a/f.txt").await).await, "top");
+
+        // COPY a collection into its own descendant.
+        assert_eq!(
+            copy(&server, "/a/", "/a/sub/", None, None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            resp_to_string(get(&server, "/a/sub/g.txt").await).await,
+            "inner"
+        );
+        assert_eq!(
+            get(&server, "/a/sub/f.txt").await.status(),
+            StatusCode::NOT_FOUND
+        );
+
+        // MOVE a file onto the collection that contains it.
+        assert_eq!(
+            move_(&server, "/a/f.txt", "/a/", None, None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(resp_to_string(get(&server, "/a/f.txt").await).await, "top");
+        assert_eq!(
+            resp_to_string(get(&server, "/a/sub/g.txt").await).await,
+            "inner"
+        );
+    }
+
+    #[tokio::test]
     async fn copy_destination_absolute_url() {
         let server = setup();
         assert_eq!(put(&server, "/a.txt", "alpha").await, StatusCode::CREATED);

@@ -222,8 +222,11 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             return Err(StatusCode::PRECONDITION_FAILED.into());
         }
 
-        // check if source == dest
-        if path == dest {
+        // check if source == dest, or if one is nested inside the other.
+        // Copying or moving a collection into itself is impossible, and
+        // deleting the destination first would destroy the source (or the
+        // destination's own content) before the operation fails.
+        if path == dest || dest.is_in_collection(&path) || path.is_in_collection(&dest) {
             return Err(StatusCode::FORBIDDEN.into());
         }
 
