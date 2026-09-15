@@ -202,7 +202,6 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             if let XMLNode::Element(elem) = child {
                 match elem.name.as_str() {
                     "filter" => {
-                        // Parse comp-filter elements
                         for filter_child in &elem.children {
                             if let XMLNode::Element(filter_elem) = filter_child
                                 && filter_elem.name == "comp-filter"
@@ -222,6 +221,11 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     _ => {}
                 }
             }
+        }
+
+        // RFC 4791 7.8.1: CALDAV:filter (with a nested comp-filter) is required.
+        if query.comp_filter.is_none() {
+            return Err(DavError::StatusClose(StatusCode::BAD_REQUEST));
         }
 
         Ok(query)
@@ -471,17 +475,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     }
 
     fn matches_query(&self, content: &str, query: &CalendarQuery) -> bool {
-        // Simple implementation - a full implementation would parse the iCalendar
-        // and apply all the filters properly
-
-        if let Some(ref comp_filter) = query.comp_filter
-            && !comp_filter.name.is_empty()
-            && !content.contains(&format!("BEGIN:{}", comp_filter.name))
-        {
-            false
-        } else {
-            true
-        }
+        calendar_matches_query(content, query)
     }
 
     #[cfg(feature = "caldav")]

@@ -42,19 +42,51 @@ mod caldav_tests {
     }
 
     fn create_ics_data(uid: &str, summary: &str) -> String {
+        create_vevent_ics(uid, summary, "20240101T120000Z", "20240101T130000Z")
+    }
+
+    fn create_vevent_ics(uid: &str, summary: &str, dtstart: &str, dtend: &str) -> String {
         format!(
             "BEGIN:VCALENDAR
 VERSION:2.0
 PRODID:-//Test//Test//EN
 BEGIN:VEVENT
 UID:{uid}
-DTSTART:20240101T120000Z
-DTEND:20240101T130000Z
+DTSTART:{dtstart}
+DTEND:{dtend}
 SUMMARY:{summary}
 DESCRIPTION:This is a test event
 END:VEVENT
 END:VCALENDAR"
         )
+    }
+
+    fn create_vtodo_ics(uid: &str, summary: &str) -> String {
+        format!(
+            "BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//Test//EN
+BEGIN:VTODO
+UID:{uid}
+DTSTART:20240101T120000Z
+DUE:20240101T130000Z
+SUMMARY:{summary}
+END:VTODO
+END:VCALENDAR"
+        )
+    }
+
+    async fn report_calendar_query(server: &DavHandler, body: &str) -> (StatusCode, String) {
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/calendars/my-calendar")
+            .header("Depth", "1")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = server.handle(req).await;
+        let status = resp.status();
+        let body_str = resp_to_string(resp).await;
+        (status, body_str)
     }
 
     async fn put_ics_data(server: &DavHandler, ics_data: String, uri: &str) -> Response<Body> {
@@ -193,6 +225,153 @@ END:VCALENDAR"
         let body_str = resp_to_string(resp).await;
         assert!(body_str.contains("calendar-data"));
         assert!(body_str.contains("Test Event"));
+    }
+
+    #[tokio::test]
+    async fn test_calendar_query_filters_by_component_type() {
+        let server = setup_caldav_server2().await;
+        put_ics_data(
+            &server,
+            create_ics_data("event-1", "Test Event"),
+            "/calendars/my-calendar/event.ics",
+        )
+        .await;
+        put_ics_data(
+            &server,
+            create_vtodo_ics("todo-1", "Test Todo"),
+            "/calendars/my-calendar/todo.ics",
+        )
+        .await;
+
+        let event_query = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT"/>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>"#;
+
+        let (status, body) = report_calendar_query(&server, event_query).await;
+        assert_eq!(status, StatusCode::MULTI_STATUS);
+        assert!(
+            body.contains("Test Event"),
+            "VEVENT query missing event: {body}"
+        );
+        assert!(
+            !body.contains("Test Todo"),
+            "VEVENT query must not return VTODO: {body}"
+        );
+
+        let todo_query = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VTODO"/>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>"#;
+
+        let (status, body) = report_calendar_query(&server, todo_query).await;
+        assert_eq!(status, StatusCode::MULTI_STATUS);
+        assert!(
+            body.contains("Test Todo"),
+            "VTODO query missing todo: {body}"
+        );
+        assert!(
+            !body.contains("Test Event"),
+            "VTODO query must not return VEVENT: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_calendar_query_without_filter_is_bad_request() {
+        let server = setup_caldav_server2().await;
+        put_ics_data(
+            &server,
+            create_ics_data("event-1", "Test Event"),
+            "/calendars/my-calendar/event.ics",
+        )
+        .await;
+
+        let no_filter = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+</C:calendar-query>"#;
+
+        let (status, _) = report_calendar_query(&server, no_filter).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let empty_filter = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter/>
+</C:calendar-query>"#;
+
+        let (status, _) = report_calendar_query(&server, empty_filter).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_calendar_query_time_range_excludes_outside_event() {
+        let server = setup_caldav_server2().await;
+        put_ics_data(
+            &server,
+            create_vevent_ics(
+                "jan-event",
+                "January Event",
+                "20240101T120000Z",
+                "20240101T130000Z",
+            ),
+            "/calendars/my-calendar/jan.ics",
+        )
+        .await;
+        put_ics_data(
+            &server,
+            create_vevent_ics(
+                "jun-event",
+                "June Event",
+                "20240615T120000Z",
+                "20240615T130000Z",
+            ),
+            "/calendars/my-calendar/jun.ics",
+        )
+        .await;
+
+        let june_query = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT">
+        <C:time-range start="20240601T000000Z" end="20240701T000000Z"/>
+      </C:comp-filter>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>"#;
+
+        let (status, body) = report_calendar_query(&server, june_query).await;
+        assert_eq!(status, StatusCode::MULTI_STATUS);
+        assert!(
+            body.contains("June Event"),
+            "in-range event missing: {body}"
+        );
+        assert!(
+            !body.contains("January Event"),
+            "out-of-range event must be excluded: {body}"
+        );
     }
 
     #[tokio::test]
