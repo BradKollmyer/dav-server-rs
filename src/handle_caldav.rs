@@ -394,19 +394,16 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                         .fs
                         .open(&item_path, OpenOptions::read(), &self.credentials)
                         .await
+                        && let Ok(metadata) = file.metadata().await
+                        && let Ok(data) = file.read_bytes(metadata.len() as usize).await
+                        && is_calendar_data(&data)
                     {
-                        let metadata = file.metadata().await?;
-                        let etag = metadata.etag().unwrap_or_default().to_string();
+                        let content = String::from_utf8_lossy(&data);
 
-                        if let Ok(data) = file.read_bytes(metadata.len() as usize).await
-                            && is_calendar_data(&data)
-                        {
-                            let content = String::from_utf8_lossy(&data);
-
-                            if self.matches_query(&content, &query) {
-                                results.push((item_path.clone(), etag, content.to_string()));
-                                continue;
-                            }
+                        if self.matches_query(&content, &query) {
+                            let etag = metadata.etag().unwrap_or_default().to_string();
+                            results.push((item_path.clone(), etag, content.to_string()));
+                            continue;
                         }
                     }
                 }
