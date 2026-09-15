@@ -12,6 +12,7 @@ use crate::{DavInner, DavResult};
 
 use crate::async_stream::AsyncStream;
 use crate::carddav::*;
+use crate::dav_filters::hrefs_from;
 use crate::davpath::DavPath;
 use crate::handle_props::PropWriter;
 
@@ -150,7 +151,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     Ok(CardDavReportType::AddressBookQuery(query))
                 }
                 "addressbook-multiget" => {
-                    let hrefs = self.parse_addressbook_multiget(root)?;
+                    let hrefs = hrefs_from(root);
                     Ok(CardDavReportType::AddressBookMultiget { hrefs })
                 }
                 _ => Err(DavError::StatusClose(StatusCode::BAD_REQUEST)),
@@ -235,12 +236,12 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                         filter.is_not_defined = true;
                     }
                     "text-match" => {
-                        filter.text_match = Some(self.parse_carddav_text_match(child_elem)?);
+                        filter.text_match = Some(TextMatch::from_element(child_elem));
                     }
                     "param-filter" => {
                         filter
                             .param_filters
-                            .push(self.parse_carddav_param_filter(child_elem)?);
+                            .push(ParameterFilter::from_element(child_elem)?);
                     }
                     _ => {}
                 }
@@ -248,79 +249,6 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         }
 
         Ok(filter)
-    }
-
-    fn parse_carddav_text_match(&self, elem: &Element) -> DavResult<TextMatch> {
-        let text = elem
-            .children
-            .iter()
-            .find_map(|child| {
-                if let XMLNode::Text(text) = child {
-                    Some(text.clone())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
-
-        Ok(TextMatch {
-            text,
-            collation: elem.attributes.get("collation").cloned(),
-            negate_condition: elem
-                .attributes
-                .get("negate-condition")
-                .map(|v| v == "yes")
-                .unwrap_or(false),
-            match_type: elem.attributes.get("match-type").cloned(),
-        })
-    }
-
-    fn parse_carddav_param_filter(&self, elem: &Element) -> DavResult<ParameterFilter> {
-        let name = elem
-            .attributes
-            .get("name")
-            .ok_or(DavError::StatusClose(StatusCode::BAD_REQUEST))?
-            .clone();
-
-        let mut filter = ParameterFilter {
-            name,
-            is_not_defined: false,
-            text_match: None,
-        };
-
-        for child in &elem.children {
-            if let XMLNode::Element(child_elem) = child {
-                match child_elem.name.as_str() {
-                    "is-not-defined" => {
-                        filter.is_not_defined = true;
-                    }
-                    "text-match" => {
-                        filter.text_match = Some(self.parse_carddav_text_match(child_elem)?);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        Ok(filter)
-    }
-
-    fn parse_addressbook_multiget(&self, root: &Element) -> DavResult<Vec<String>> {
-        let mut hrefs = Vec::new();
-
-        for child in &root.children {
-            if let XMLNode::Element(elem) = child
-                && elem.name == "href"
-            {
-                for href_child in &elem.children {
-                    if let XMLNode::Text(href) = href_child {
-                        hrefs.push(href.clone());
-                    }
-                }
-            }
-        }
-
-        Ok(hrefs)
     }
 
     async fn handle_addressbook_query(

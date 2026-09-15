@@ -14,6 +14,7 @@ use crate::{DavInner, DavResult};
 
 use crate::async_stream::AsyncStream;
 use crate::caldav::*;
+use crate::dav_filters::hrefs_from;
 use crate::davheaders;
 use crate::davpath::DavPath;
 use crate::handle_props::PropWriter;
@@ -255,7 +256,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     Ok(CalDavReportType::CalendarQuery(query))
                 }
                 "calendar-multiget" => {
-                    let hrefs = self.parse_calendar_multiget(root)?;
+                    let hrefs = hrefs_from(root);
                     Ok(CalDavReportType::CalendarMultiget { hrefs })
                 }
                 "free-busy-query" => {
@@ -376,42 +377,12 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                         filter.time_range = Some(self.parse_time_range(child_elem)?);
                     }
                     "text-match" => {
-                        filter.text_match = Some(self.parse_text_match(child_elem)?);
+                        filter.text_match = Some(TextMatch::from_element(child_elem));
                     }
                     "param-filter" => {
                         filter
                             .param_filters
-                            .push(self.parse_param_filter(child_elem)?);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        Ok(filter)
-    }
-
-    fn parse_param_filter(&self, elem: &Element) -> DavResult<ParameterFilter> {
-        let name = elem
-            .attributes
-            .get("name")
-            .ok_or(DavError::StatusClose(StatusCode::BAD_REQUEST))?
-            .clone();
-
-        let mut filter = ParameterFilter {
-            name,
-            is_not_defined: false,
-            text_match: None,
-        };
-
-        for child in &elem.children {
-            if let XMLNode::Element(child_elem) = child {
-                match child_elem.name.as_str() {
-                    "is-not-defined" => {
-                        filter.is_not_defined = true;
-                    }
-                    "text-match" => {
-                        filter.text_match = Some(self.parse_text_match(child_elem)?);
+                            .push(ParameterFilter::from_element(child_elem)?);
                     }
                     _ => {}
                 }
@@ -426,49 +397,6 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             start: elem.attributes.get("start").cloned(),
             end: elem.attributes.get("end").cloned(),
         })
-    }
-
-    fn parse_text_match(&self, elem: &Element) -> DavResult<TextMatch> {
-        let text = elem
-            .children
-            .iter()
-            .find_map(|child| {
-                if let XMLNode::Text(text) = child {
-                    Some(text.clone())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
-
-        Ok(TextMatch {
-            text,
-            collation: elem.attributes.get("collation").cloned(),
-            negate_condition: elem
-                .attributes
-                .get("negate-condition")
-                .map(|v| v == "yes")
-                .unwrap_or(false),
-            match_type: elem.attributes.get("match-type").cloned(),
-        })
-    }
-
-    fn parse_calendar_multiget(&self, root: &Element) -> DavResult<Vec<String>> {
-        let mut hrefs = Vec::new();
-
-        for child in &root.children {
-            if let XMLNode::Element(elem) = child
-                && elem.name == "href"
-            {
-                for href_child in &elem.children {
-                    if let XMLNode::Text(href) = href_child {
-                        hrefs.push(href.clone());
-                    }
-                }
-            }
-        }
-
-        Ok(hrefs)
     }
 
     fn parse_freebusy_query(&self, root: &Element) -> DavResult<TimeRange> {
