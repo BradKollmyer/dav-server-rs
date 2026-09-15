@@ -751,14 +751,17 @@ fn trim_left(mut out: &'_ [u8]) -> &'_ [u8] {
 fn scan_until(buf: &[u8], c: u8) -> Result<(&[u8], &[u8]), headers::Error> {
     let mut i = 1;
     let mut quote = false;
-    while quote || buf[i] != c {
-        if buf.is_empty() || is_whitespace(buf[i]) {
+    while i < buf.len() && (quote || buf[i] != c) {
+        if is_whitespace(buf[i]) {
             return Err(invalid());
         }
         if buf[i] == b'"' {
             quote = !quote;
         }
-        i += 1
+        i += 1;
+    }
+    if i >= buf.len() || quote {
+        return Err(invalid());
     }
     Ok((&buf[1..i], &buf[i + 1..]))
 }
@@ -915,6 +918,27 @@ mod tests {
         let mut iter = std::iter::once(&hdrval);
         let hdr = If::decode(&mut iter);
         assert!(hdr.is_ok());
+    }
+
+    #[test]
+    fn if_header_truncated_coded_url() {
+        let hdrval = HeaderValue::from_static("<");
+        let mut iter = std::iter::once(&hdrval);
+        assert!(If::decode(&mut iter).is_err());
+    }
+
+    #[test]
+    fn if_header_unclosed_coded_url() {
+        let hdrval = HeaderValue::from_static("(<opaquelocktoken:foo");
+        let mut iter = std::iter::once(&hdrval);
+        assert!(If::decode(&mut iter).is_err());
+    }
+
+    #[test]
+    fn if_header_truncated_etag() {
+        let hdrval = HeaderValue::from_static("[");
+        let mut iter = std::iter::once(&hdrval);
+        assert!(If::decode(&mut iter).is_err());
     }
 
     #[test]
