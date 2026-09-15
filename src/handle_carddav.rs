@@ -69,7 +69,10 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             return Err(DavError::Status(StatusCode::FORBIDDEN));
         }
         let resp = self.handle_mkcol(req, &[]).await?;
-        self.fs.mark_addressbook(&path, &self.credentials).await?;
+        if let Err(e) = self.fs.mark_addressbook(&path, &self.credentials).await {
+            let _ = self.fs.remove_dir(&path, &self.credentials).await;
+            return Err(e.into());
+        }
         self.apply_mkcol_set_props(&path, set_props).await;
         Ok(resp)
     }

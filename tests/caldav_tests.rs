@@ -1720,15 +1720,20 @@ END:VCALENDAR"#
     }
 
     /// MemFs wrapper that keeps dead props but uses default `mark_calendar`
-    /// (metadata `is_calendar` stays false).
+    /// (metadata `is_calendar` stays false). When the flag is set,
+    /// `patch_props` refuses the CalDAV calendar marker with 403.
     #[cfg(feature = "proppatch")]
     #[derive(Clone)]
-    struct DeadPropCalFs(dav_server::memfs::MemFs);
+    struct DeadPropCalFs(dav_server::memfs::MemFs, bool);
 
     #[cfg(feature = "proppatch")]
     impl DeadPropCalFs {
         fn new() -> Box<Self> {
-            Box::new(Self(*dav_server::memfs::MemFs::new()))
+            Box::new(Self(*dav_server::memfs::MemFs::new(), false))
+        }
+
+        fn refusing_marker() -> Box<Self> {
+            Box::new(Self(*dav_server::memfs::MemFs::new(), true))
         }
     }
 
@@ -1774,6 +1779,13 @@ END:VCALENDAR"#
             self.0.create_dir(path)
         }
 
+        fn remove_dir<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+        ) -> dav_server::fs::FsFuture<'a, ()> {
+            self.0.remove_dir(path)
+        }
+
         fn have_props<'a>(
             &'a self,
             path: &'a dav_server::davpath::DavPath,
@@ -1786,6 +1798,16 @@ END:VCALENDAR"#
             path: &'a dav_server::davpath::DavPath,
             patch: Vec<(bool, dav_server::fs::DavProp)>,
         ) -> dav_server::fs::FsFuture<'a, Vec<(StatusCode, dav_server::fs::DavProp)>> {
+            let is_marker = |p: &dav_server::fs::DavProp| {
+                p.name == "calendar" && p.namespace.as_deref() == Some(NS_CALDAV_URI)
+            };
+            if self.1 && patch.iter().any(|(_, p)| is_marker(p)) {
+                let res = patch
+                    .into_iter()
+                    .map(|(_, p)| (StatusCode::FORBIDDEN, p))
+                    .collect();
+                return Box::pin(std::future::ready(Ok(res)));
+            }
             self.0.patch_props(path, patch)
         }
 
@@ -2166,6 +2188,47 @@ END:VCALENDAR"#
             1,
             "type marker leaked as a dead property: {body_str}"
         );
+    }
+
+    /// RFC 4791 5.3.1.2: a failed MKCALENDAR must not leave a collection behind.
+    #[cfg(feature = "proppatch")]
+    #[tokio::test]
+    async fn test_mkcalendar_refused_marker_fails_and_removes_collection() {
+        let server = DavHandler::builder()
+            .filesystem(DeadPropCalFs::refusing_marker())
+            .locksystem(FakeLs::new())
+            .build_handler();
+        mkcol(&server, "/calendars").await;
+
+        let req = Request::builder()
+            .method("MKCALENDAR")
+            .uri("/calendars/refused-cal")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/calendars/refused-cal")
+            .header("Depth", "0")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "failed MKCALENDAR must not leave a plain collection"
+        );
+
+        // A retry must not be answered with 405 from the orphaned directory.
+        let req = Request::builder()
+            .method("MKCALENDAR")
+            .uri("/calendars/refused-cal")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }
 

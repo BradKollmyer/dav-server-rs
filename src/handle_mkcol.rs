@@ -113,13 +113,18 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             }
         }
 
+        // A failed type marker must not leave a plain collection behind
+        // (RFC 4791 5.3.1.2), so undo the create_dir before failing.
         #[cfg(feature = "caldav")]
-        if want_calendar {
-            self.fs.mark_calendar(&path, &self.credentials).await?;
+        if want_calendar && let Err(e) = self.fs.mark_calendar(&path, &self.credentials).await {
+            let _ = self.fs.remove_dir(&path, &self.credentials).await;
+            return Err(e.into());
         }
         #[cfg(feature = "carddav")]
-        if want_addressbook {
-            self.fs.mark_addressbook(&path, &self.credentials).await?;
+        if want_addressbook && let Err(e) = self.fs.mark_addressbook(&path, &self.credentials).await
+        {
+            let _ = self.fs.remove_dir(&path, &self.credentials).await;
+            return Err(e.into());
         }
 
         if let Some(tree) = mkcol_body {

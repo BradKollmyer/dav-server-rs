@@ -8,7 +8,10 @@
 //! - dav://dirs:-@127.0.0.1:4918 — responds only with directories.
 //! - dav://files:-@127.0.0.1:4918 — responds only with files.
 
-use std::{convert::Infallible, fmt::Display, net::SocketAddr, path::Path};
+use std::{
+    convert::Infallible, fmt::Display, future::Future, net::SocketAddr, path::Path, pin::Pin,
+    time::SystemTime,
+};
 
 use futures_util::{StreamExt, stream};
 use http::{Request, Response, StatusCode};
@@ -22,8 +25,8 @@ use dav_server::{
     davpath::DavPath,
     fakels::FakeLs,
     fs::{
-        DavDirEntry, DavFile, DavMetaData, FsFuture, FsResult, FsStream, GuardedFileSystem,
-        OpenOptions, ReadDirMeta,
+        DavDirEntry, DavFile, DavMetaData, DavProp, FsFuture, FsResult, FsStream,
+        GuardedFileSystem, OpenOptions, ReadDirMeta,
     },
     localfs::LocalFs,
 };
@@ -136,6 +139,116 @@ impl GuardedFileSystem<Filter> for FilteredFs {
         _credentials: &'a Filter,
     ) -> FsFuture<'a, Box<dyn DavMetaData>> {
         self.inner.symlink_metadata(path, &())
+    }
+
+    // The filter only affects listings; everything else is forwarded as-is.
+    // Without these, writes would be 501 and MKCALENDAR / MKADDRESSBOOK would
+    // silently create plain collections.
+
+    fn create_dir<'a>(&'a self, path: &'a DavPath, _credentials: &'a Filter) -> FsFuture<'a, ()> {
+        self.inner.create_dir(path, &())
+    }
+
+    fn remove_dir<'a>(&'a self, path: &'a DavPath, _credentials: &'a Filter) -> FsFuture<'a, ()> {
+        self.inner.remove_dir(path, &())
+    }
+
+    fn remove_file<'a>(&'a self, path: &'a DavPath, _credentials: &'a Filter) -> FsFuture<'a, ()> {
+        self.inner.remove_file(path, &())
+    }
+
+    fn rename<'a>(
+        &'a self,
+        from: &'a DavPath,
+        to: &'a DavPath,
+        _credentials: &'a Filter,
+    ) -> FsFuture<'a, ()> {
+        self.inner.rename(from, to, &())
+    }
+
+    fn copy<'a>(
+        &'a self,
+        from: &'a DavPath,
+        to: &'a DavPath,
+        _credentials: &'a Filter,
+    ) -> FsFuture<'a, ()> {
+        self.inner.copy(from, to, &())
+    }
+
+    fn set_modified<'a>(
+        &'a self,
+        path: &'a DavPath,
+        tm: SystemTime,
+        _credentials: &'a Filter,
+    ) -> FsFuture<'a, ()> {
+        self.inner.set_modified(path, tm, &())
+    }
+
+    fn set_created<'a>(
+        &'a self,
+        path: &'a DavPath,
+        tm: SystemTime,
+        _credentials: &'a Filter,
+    ) -> FsFuture<'a, ()> {
+        self.inner.set_created(path, tm, &())
+    }
+
+    fn have_props<'a>(
+        &'a self,
+        path: &'a DavPath,
+        _credentials: &'a Filter,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        self.inner.have_props(path, &())
+    }
+
+    #[cfg(feature = "proppatch")]
+    fn patch_props<'a>(
+        &'a self,
+        path: &'a DavPath,
+        patch: Vec<(bool, DavProp)>,
+        _credentials: &'a Filter,
+    ) -> FsFuture<'a, Vec<(StatusCode, DavProp)>> {
+        self.inner.patch_props(path, patch, &())
+    }
+
+    fn get_props<'a>(
+        &'a self,
+        path: &'a DavPath,
+        do_content: bool,
+        _credentials: &'a Filter,
+    ) -> FsFuture<'a, Vec<DavProp>> {
+        self.inner.get_props(path, do_content, &())
+    }
+
+    fn get_prop<'a>(
+        &'a self,
+        path: &'a DavPath,
+        prop: DavProp,
+        _credentials: &'a Filter,
+    ) -> FsFuture<'a, Vec<u8>> {
+        self.inner.get_prop(path, prop, &())
+    }
+
+    fn get_quota<'a>(&'a self, _credentials: &'a Filter) -> FsFuture<'a, (u64, Option<u64>)> {
+        self.inner.get_quota(&())
+    }
+
+    #[cfg(feature = "caldav")]
+    fn mark_calendar<'a>(
+        &'a self,
+        path: &'a DavPath,
+        _credentials: &'a Filter,
+    ) -> FsFuture<'a, ()> {
+        self.inner.mark_calendar(path, &())
+    }
+
+    #[cfg(feature = "carddav")]
+    fn mark_addressbook<'a>(
+        &'a self,
+        path: &'a DavPath,
+        _credentials: &'a Filter,
+    ) -> FsFuture<'a, ()> {
+        self.inner.mark_addressbook(path, &())
     }
 }
 

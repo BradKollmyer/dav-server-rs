@@ -152,6 +152,16 @@ fn collection_type_marker(prefix: &str, namespace: &str, name: &str) -> DavProp 
     }
 }
 
+/// Turn a `patch_props` result for a collection type marker into an error
+/// when the filesystem refused to store it.
+#[cfg(all(feature = "proppatch", any(feature = "caldav", feature = "carddav")))]
+fn check_marker_patch(res: Vec<(StatusCode, DavProp)>) -> FsResult<()> {
+    if res.iter().any(|(status, _)| !status.is_success()) {
+        return Err(FsError::Forbidden);
+    }
+    Ok(())
+}
+
 #[cfg(feature = "caldav")]
 pub(crate) fn is_calendar_type_marker(prop: &DavProp) -> bool {
     prop.name == "calendar" && prop.namespace.as_deref() == Some(crate::caldav::NS_CALDAV_URI)
@@ -414,8 +424,10 @@ pub trait DavFileSystem {
         Box::pin(async move {
             #[cfg(feature = "proppatch")]
             if self.have_props(path).await {
-                self.patch_props(path, vec![(true, calendar_type_marker())])
+                let res = self
+                    .patch_props(path, vec![(true, calendar_type_marker())])
                     .await?;
+                check_marker_patch(res)?;
             }
             Ok(())
         })
@@ -435,8 +447,10 @@ pub trait DavFileSystem {
         Box::pin(async move {
             #[cfg(feature = "proppatch")]
             if self.have_props(path).await {
-                self.patch_props(path, vec![(true, addressbook_type_marker())])
+                let res = self
+                    .patch_props(path, vec![(true, addressbook_type_marker())])
                     .await?;
+                check_marker_patch(res)?;
             }
             Ok(())
         })
@@ -693,8 +707,10 @@ where
         Box::pin(async move {
             #[cfg(feature = "proppatch")]
             if self.have_props(path, credentials).await {
-                self.patch_props(path, vec![(true, calendar_type_marker())], credentials)
+                let res = self
+                    .patch_props(path, vec![(true, calendar_type_marker())], credentials)
                     .await?;
+                check_marker_patch(res)?;
             }
             Ok(())
         })
@@ -711,8 +727,10 @@ where
         Box::pin(async move {
             #[cfg(feature = "proppatch")]
             if self.have_props(path, credentials).await {
-                self.patch_props(path, vec![(true, addressbook_type_marker())], credentials)
+                let res = self
+                    .patch_props(path, vec![(true, addressbook_type_marker())], credentials)
                     .await?;
+                check_marker_patch(res)?;
             }
             Ok(())
         })
@@ -1152,6 +1170,8 @@ mod default_mark_collection_props {
     #[derive(Clone, Default)]
     struct HashMapPropFs {
         have_props: bool,
+        /// Status reported by `patch_props` for every property (default 200).
+        patch_status: StatusCode,
         props: Arc<Mutex<DeadProps>>,
     }
 
@@ -1227,12 +1247,14 @@ mod default_mark_collection_props {
                         namespace: p.namespace.clone(),
                         xml: None,
                     };
-                    if set {
+                    if !self.patch_status.is_success() {
+                        // Refused: leave the store untouched.
+                    } else if set {
                         entry.insert(key, p);
                     } else {
                         entry.remove(&key);
                     }
-                    res.push((StatusCode::OK, cloned));
+                    res.push((self.patch_status, cloned));
                 }
                 Ok(res)
             })
@@ -1280,6 +1302,40 @@ mod default_mark_collection_props {
         DavFileSystem::mark_calendar(&fs, &path).await.unwrap();
         let props = DavFileSystem::get_props(&fs, &path, false).await.unwrap();
         assert!(props.is_empty());
+    }
+
+    #[cfg(feature = "caldav")]
+    #[tokio::test]
+    async fn default_mark_calendar_fails_when_marker_is_refused() {
+        let fs = HashMapPropFs {
+            have_props: true,
+            patch_status: StatusCode::FORBIDDEN,
+            ..HashMapPropFs::default()
+        };
+        let path = DavPath::new("/cal").unwrap();
+        let res = DavFileSystem::mark_calendar(&fs, &path).await;
+        assert!(
+            matches!(res, Err(FsError::Forbidden)),
+            "a refused marker must not be reported as success: {res:?}"
+        );
+        let props = DavFileSystem::get_props(&fs, &path, false).await.unwrap();
+        assert!(props.is_empty());
+    }
+
+    #[cfg(feature = "carddav")]
+    #[tokio::test]
+    async fn default_mark_addressbook_fails_when_marker_is_refused() {
+        let fs = HashMapPropFs {
+            have_props: true,
+            patch_status: StatusCode::FORBIDDEN,
+            ..HashMapPropFs::default()
+        };
+        let path = DavPath::new("/ab").unwrap();
+        let res = DavFileSystem::mark_addressbook(&fs, &path).await;
+        assert!(
+            matches!(res, Err(FsError::Forbidden)),
+            "a refused marker must not be reported as success: {res:?}"
+        );
     }
 
     #[cfg(feature = "carddav")]

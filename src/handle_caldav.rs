@@ -174,7 +174,11 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             Ok(()) => {}
         }
 
-        self.fs.mark_calendar(&path, &self.credentials).await?;
+        // RFC 4791 5.3.1.2: a failed MKCALENDAR must not leave a collection behind.
+        if let Err(e) = self.fs.mark_calendar(&path, &self.credentials).await {
+            let _ = self.fs.remove_dir(&path, &self.credentials).await;
+            return Err(e.into());
+        }
 
         if let Some(tree) = mkcalendar {
             #[cfg(feature = "proppatch")]
