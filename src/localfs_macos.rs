@@ -165,7 +165,7 @@ impl DUCacheBuilder {
     #[cfg(windows)]
     pub fn add(&mut self, filename: OsString) {
         if let Some(f) = Path::new(&filename).file_name()
-            && f.to_str().unwrap().as_bytes().starts_with(b"._")
+            && f.to_str().is_some_and(|s| s.as_bytes().starts_with(b"._"))
         {
             self.entries.push(filename);
         }
@@ -300,7 +300,7 @@ impl LocalFs {
         if !self.inner.macos {
             return false;
         }
-        match path.file_name().map(|p| p.to_str().unwrap().as_bytes()) {
+        match path.file_name().and_then(|p| p.to_str()).map(str::as_bytes) {
             Some(b".localized") => true,
             Some(name) if name.starts_with(b"._") => DU_CACHE.negative(path),
             _ => false,

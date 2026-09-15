@@ -897,7 +897,11 @@ impl DavDirEntry for LocalFsDirEntry {
 
     #[cfg(windows)]
     fn name(&self) -> Vec<u8> {
-        self.entry.file_name().to_str().unwrap().as_bytes().to_vec()
+        self.entry
+            .file_name()
+            .to_string_lossy()
+            .into_owned()
+            .into_bytes()
     }
 
     fn is_dir(&'_ self) -> FsFuture<'_, bool> {

@@ -148,7 +148,13 @@ fn normalize_path(rp: &[u8]) -> Result<Vec<u8>, ParseError> {
     if isdir || v.is_empty() {
         v.push(b"/");
     }
-    Ok(v.join(&b""[..]))
+    let path = v.join(&b""[..]);
+    // Windows and WASI paths are UTF-8; reject here so as_pathbuf never panics.
+    #[cfg(any(target_os = "windows", target_os = "wasi"))]
+    if std::str::from_utf8(&path).is_err() {
+        return Err(ParseError::InvalidPath);
+    }
+    Ok(path)
 }
 
 /// Comparison ignores any trailing slash, so /foo == /foo/
@@ -341,7 +347,10 @@ impl DavPathRef {
         #[cfg(all(not(target_os = "windows"), not(target_os = "wasi")))]
         let os_string = OsStr::from_bytes(b).to_owned();
         #[cfg(any(target_os = "windows", target_os = "wasi"))]
-        let os_string = OsString::from(String::from_utf8(b.to_vec()).unwrap());
+        let os_string = match String::from_utf8(b.to_vec()) {
+            Ok(s) => OsString::from(s),
+            Err(_) => OsString::from(String::from_utf8_lossy(b).into_owned()),
+        };
         PathBuf::from(os_string)
     }
 
@@ -385,7 +394,10 @@ impl DavPathRef {
         #[cfg(all(not(target_os = "windows"), not(target_os = "wasi")))]
         let os_string = OsStr::from_bytes(path);
         #[cfg(any(target_os = "windows", target_os = "wasi"))]
-        let os_string: &OsStr = std::str::from_utf8(path).unwrap().as_ref();
+        let os_string: &OsStr = match std::str::from_utf8(path) {
+            Ok(s) => s.as_ref(),
+            Err(_) => OsStr::new(""),
+        };
         Path::new(os_string)
     }
 
@@ -441,5 +453,39 @@ impl DavPathRef {
             return t;
         }
         "application/octet-stream"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_encoded_non_utf8() {
+        let r = DavPath::new("/%ff");
+        #[cfg(any(target_os = "windows", target_os = "wasi"))]
+        assert!(matches!(r, Err(ParseError::InvalidPath)));
+        #[cfg(all(not(target_os = "windows"), not(target_os = "wasi")))]
+        {
+            let p = r.expect("unix allows non-utf8 path bytes");
+            let _ = p.as_pathbuf();
+            let _ = p.as_rel_ospath();
+        }
+    }
+
+    #[test]
+    fn percent_encoded_utf8_is_valid() {
+        let p = DavPath::new("/%c3%a9").unwrap();
+        assert_eq!(p.as_bytes(), "/é".as_bytes());
+        let _ = p.as_pathbuf();
+        let _ = p.as_rel_ospath();
+    }
+
+    #[test]
+    fn as_pathbuf_and_as_rel_ospath_tolerate_non_utf8_segments() {
+        let mut p = DavPath::new("/ok").unwrap();
+        p.push_segment(&[0xff, b'x']);
+        let _ = p.as_pathbuf();
+        let _ = p.as_rel_ospath();
     }
 }
