@@ -130,6 +130,78 @@ impl DavProp {
     }
 }
 
+/// Dead-property marker written by the default `mark_calendar` implementation.
+#[cfg(all(feature = "caldav", feature = "proppatch"))]
+pub(crate) fn calendar_type_marker() -> DavProp {
+    collection_type_marker("C", crate::caldav::NS_CALDAV_URI, "calendar")
+}
+
+/// Dead-property marker written by the default `mark_addressbook` implementation.
+#[cfg(all(feature = "carddav", feature = "proppatch"))]
+pub(crate) fn addressbook_type_marker() -> DavProp {
+    collection_type_marker("CARD", crate::carddav::NS_CARDDAV_URI, "addressbook")
+}
+
+#[cfg(all(feature = "proppatch", any(feature = "caldav", feature = "carddav")))]
+fn collection_type_marker(prefix: &str, namespace: &str, name: &str) -> DavProp {
+    DavProp {
+        name: name.to_string(),
+        prefix: Some(prefix.to_string()),
+        namespace: Some(namespace.to_string()),
+        xml: Some(format!("<{prefix}:{name} xmlns:{prefix}=\"{namespace}\"/>").into_bytes()),
+    }
+}
+
+#[cfg(feature = "caldav")]
+pub(crate) fn is_calendar_type_marker(prop: &DavProp) -> bool {
+    prop.name == "calendar" && prop.namespace.as_deref() == Some(crate::caldav::NS_CALDAV_URI)
+}
+
+#[cfg(feature = "carddav")]
+pub(crate) fn is_addressbook_type_marker(prop: &DavProp) -> bool {
+    prop.name == "addressbook" && prop.namespace.as_deref() == Some(crate::carddav::NS_CARDDAV_URI)
+}
+
+/// True if metadata or a stored CalDAV marker property says this is a calendar.
+#[cfg(feature = "caldav")]
+pub(crate) async fn meta_or_prop_is_calendar<C>(
+    fs: &dyn GuardedFileSystem<C>,
+    path: &DavPath,
+    meta: &dyn DavMetaData,
+    credentials: &C,
+) -> bool
+where
+    C: Clone + Send + Sync + 'static,
+{
+    if meta.is_calendar(path) {
+        return true;
+    }
+    match fs.get_props(path, false, credentials).await {
+        Ok(props) => props.iter().any(is_calendar_type_marker),
+        Err(_) => false,
+    }
+}
+
+/// True if metadata or a stored CardDAV marker property says this is an address book.
+#[cfg(feature = "carddav")]
+pub(crate) async fn meta_or_prop_is_addressbook<C>(
+    fs: &dyn GuardedFileSystem<C>,
+    path: &DavPath,
+    meta: &dyn DavMetaData,
+    credentials: &C,
+) -> bool
+where
+    C: Clone + Send + Sync + 'static,
+{
+    if meta.is_addressbook(path) {
+        return true;
+    }
+    match fs.get_props(path, false, credentials).await {
+        Ok(props) => props.iter().any(is_addressbook_type_marker),
+        Err(_) => false,
+    }
+}
+
 /// Future returned by almost all of the DavFileSystem methods.
 pub type FsFuture<'a, T> = Pin<Box<dyn Future<Output = FsResult<T>> + Send + 'a>>;
 /// Convenience alias for a boxed Stream.
@@ -314,20 +386,44 @@ pub trait DavFileSystem {
 
     /// Mark a collection as a CalDAV calendar.
     ///
-    /// The default implementation is a no-op.
+    /// When dead properties are available (`have_props` / `patch_props`), the
+    /// default stores a CalDAV `calendar` marker property. Otherwise this is
+    /// a no-op. Filesystems that keep type in metadata should override this.
     #[cfg(feature = "caldav")]
     #[allow(unused_variables)]
-    fn mark_calendar<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        Box::pin(future::ready(Ok(())))
+    fn mark_calendar<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()>
+    where
+        Self: Sync,
+    {
+        Box::pin(async move {
+            #[cfg(feature = "proppatch")]
+            if self.have_props(path).await {
+                self.patch_props(path, vec![(true, calendar_type_marker())])
+                    .await?;
+            }
+            Ok(())
+        })
     }
 
     /// Mark a collection as a CardDAV address book.
     ///
-    /// The default implementation is a no-op.
+    /// When dead properties are available (`have_props` / `patch_props`), the
+    /// default stores a CardDAV `addressbook` marker property. Otherwise this
+    /// is a no-op. Filesystems that keep type in metadata should override this.
     #[cfg(feature = "carddav")]
     #[allow(unused_variables)]
-    fn mark_addressbook<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        Box::pin(future::ready(Ok(())))
+    fn mark_addressbook<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()>
+    where
+        Self: Sync,
+    {
+        Box::pin(async move {
+            #[cfg(feature = "proppatch")]
+            if self.have_props(path).await {
+                self.patch_props(path, vec![(true, addressbook_type_marker())])
+                    .await?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -572,20 +668,38 @@ where
 
     /// Mark a collection as a CalDAV calendar.
     ///
-    /// The default implementation is a no-op.
+    /// When dead properties are available (`have_props` / `patch_props`), the
+    /// default stores a CalDAV `calendar` marker property. Otherwise this is
+    /// a no-op. Filesystems that keep type in metadata should override this.
     #[cfg(feature = "caldav")]
     #[allow(unused_variables)]
     fn mark_calendar<'a>(&'a self, path: &'a DavPath, credentials: &'a C) -> FsFuture<'a, ()> {
-        Box::pin(future::ready(Ok(())))
+        Box::pin(async move {
+            #[cfg(feature = "proppatch")]
+            if self.have_props(path, credentials).await {
+                self.patch_props(path, vec![(true, calendar_type_marker())], credentials)
+                    .await?;
+            }
+            Ok(())
+        })
     }
 
     /// Mark a collection as a CardDAV address book.
     ///
-    /// The default implementation is a no-op.
+    /// When dead properties are available (`have_props` / `patch_props`), the
+    /// default stores a CardDAV `addressbook` marker property. Otherwise this
+    /// is a no-op. Filesystems that keep type in metadata should override this.
     #[cfg(feature = "carddav")]
     #[allow(unused_variables)]
     fn mark_addressbook<'a>(&'a self, path: &'a DavPath, credentials: &'a C) -> FsFuture<'a, ()> {
-        Box::pin(future::ready(Ok(())))
+        Box::pin(async move {
+            #[cfg(feature = "proppatch")]
+            if self.have_props(path, credentials).await {
+                self.patch_props(path, vec![(true, addressbook_type_marker())], credentials)
+                    .await?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -978,5 +1092,170 @@ mod default_caldav_metadata {
         assert!(!MinimalMeta.is_calendar(&path));
         #[cfg(feature = "carddav")]
         assert!(!MinimalMeta.is_addressbook(&path));
+    }
+}
+
+// Default mark_calendar / mark_addressbook persist type as a dead property
+// when the filesystem implements have_props / patch_props / get_props.
+#[cfg(all(
+    test,
+    feature = "proppatch",
+    any(feature = "caldav", feature = "carddav")
+))]
+mod default_mark_collection_props {
+    use super::*;
+    use http::StatusCode;
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct HashMapPropFs {
+        have_props: bool,
+        props: Arc<Mutex<HashMap<Vec<u8>, HashMap<String, DavProp>>>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct DirMeta;
+
+    impl DavMetaData for DirMeta {
+        fn len(&self) -> u64 {
+            0
+        }
+        fn modified(&self) -> FsResult<SystemTime> {
+            Ok(UNIX_EPOCH)
+        }
+        fn is_dir(&self) -> bool {
+            true
+        }
+        fn is_symlink(&self) -> bool {
+            false
+        }
+    }
+
+    fn prop_key(p: &DavProp) -> String {
+        format!("{}{}", p.namespace.as_deref().unwrap_or(""), p.name)
+    }
+
+    impl DavFileSystem for HashMapPropFs {
+        fn open<'a>(
+            &'a self,
+            _path: &'a DavPath,
+            _options: OpenOptions,
+        ) -> FsFuture<'a, Box<dyn DavFile>> {
+            Box::pin(future::ready(Err(FsError::NotImplemented)))
+        }
+
+        fn read_dir<'a>(
+            &'a self,
+            _path: &'a DavPath,
+            _meta: ReadDirMeta,
+        ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
+            Box::pin(future::ready(Err(FsError::NotImplemented)))
+        }
+
+        fn metadata<'a>(&'a self, _path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
+            Box::pin(future::ready(Ok(Box::new(DirMeta) as Box<dyn DavMetaData>)))
+        }
+
+        fn symlink_metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
+            DavFileSystem::metadata(self, path)
+        }
+
+        fn have_props<'a>(
+            &'a self,
+            _path: &'a DavPath,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            let have = self.have_props;
+            Box::pin(future::ready(have))
+        }
+
+        fn patch_props<'a>(
+            &'a self,
+            path: &'a DavPath,
+            patch: Vec<(bool, DavProp)>,
+        ) -> FsFuture<'a, Vec<(StatusCode, DavProp)>> {
+            Box::pin(async move {
+                let mut store = self.props.lock().unwrap_or_else(|e| e.into_inner());
+                let entry = store.entry(path.as_bytes().to_vec()).or_default();
+                let mut res = Vec::new();
+                for (set, p) in patch {
+                    let key = prop_key(&p);
+                    let cloned = DavProp {
+                        name: p.name.clone(),
+                        prefix: p.prefix.clone(),
+                        namespace: p.namespace.clone(),
+                        xml: None,
+                    };
+                    if set {
+                        entry.insert(key, p);
+                    } else {
+                        entry.remove(&key);
+                    }
+                    res.push((StatusCode::OK, cloned));
+                }
+                Ok(res)
+            })
+        }
+
+        fn get_props<'a>(
+            &'a self,
+            path: &'a DavPath,
+            _do_content: bool,
+        ) -> FsFuture<'a, Vec<DavProp>> {
+            Box::pin(async move {
+                let store = self.props.lock().unwrap_or_else(|e| e.into_inner());
+                Ok(store
+                    .get(path.as_bytes())
+                    .map(|m| m.values().cloned().collect())
+                    .unwrap_or_default())
+            })
+        }
+    }
+
+    #[cfg(feature = "caldav")]
+    #[tokio::test]
+    async fn default_mark_calendar_writes_marker_when_have_props() {
+        let fs = HashMapPropFs {
+            have_props: true,
+            ..HashMapPropFs::default()
+        };
+        let path = DavPath::new("/cal").unwrap();
+        DavFileSystem::mark_calendar(&fs, &path).await.unwrap();
+        let props = DavFileSystem::get_props(&fs, &path, false).await.unwrap();
+        assert!(
+            props.iter().any(is_calendar_type_marker),
+            "default mark_calendar should store the CalDAV calendar marker"
+        );
+    }
+
+    #[cfg(feature = "caldav")]
+    #[tokio::test]
+    async fn default_mark_calendar_is_noop_without_props() {
+        let fs = HashMapPropFs {
+            have_props: false,
+            ..HashMapPropFs::default()
+        };
+        let path = DavPath::new("/cal").unwrap();
+        DavFileSystem::mark_calendar(&fs, &path).await.unwrap();
+        let props = DavFileSystem::get_props(&fs, &path, false).await.unwrap();
+        assert!(props.is_empty());
+    }
+
+    #[cfg(feature = "carddav")]
+    #[tokio::test]
+    async fn default_mark_addressbook_writes_marker_when_have_props() {
+        let fs = HashMapPropFs {
+            have_props: true,
+            ..HashMapPropFs::default()
+        };
+        let path = DavPath::new("/ab").unwrap();
+        DavFileSystem::mark_addressbook(&fs, &path).await.unwrap();
+        let props = DavFileSystem::get_props(&fs, &path, false).await.unwrap();
+        assert!(
+            props.iter().any(is_addressbook_type_marker),
+            "default mark_addressbook should store the CardDAV addressbook marker"
+        );
     }
 }

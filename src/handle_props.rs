@@ -934,6 +934,18 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
         })
     }
 
+    /// True if metadata or a stored CalDAV marker property says this is a calendar.
+    #[cfg(feature = "caldav")]
+    async fn collection_is_calendar(&self, path: &DavPath, meta: &dyn DavMetaData) -> bool {
+        meta_or_prop_is_calendar(self.fs.as_ref(), path, meta, &self.credentials).await
+    }
+
+    /// True if metadata or a stored CardDAV marker property says this is an address book.
+    #[cfg(feature = "carddav")]
+    async fn collection_is_addressbook(&self, path: &DavPath, meta: &dyn DavMetaData) -> bool {
+        meta_or_prop_is_addressbook(self.fs.as_ref(), path, meta, &self.credentials).await
+    }
+
     async fn get_quota<'a>(&'a self, qc: &'a mut QuotaCache) -> FsResult<(u64, Option<u64>)> {
         // do lookup only once.
         match qc.q_state {
@@ -978,14 +990,14 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                         let mut children = Vec::new();
 
                         #[cfg(feature = "caldav")]
-                        if meta.is_calendar(path) {
+                        if self.collection_is_calendar(path, meta).await {
                             ns.put("C".to_string(), NS_CALDAV_URI.to_string());
                             children.push(supported_report_elem("C", "calendar-query"));
                             children.push(supported_report_elem("C", "calendar-multiget"));
                         }
 
                         #[cfg(feature = "carddav")]
-                        if meta.is_addressbook(path) {
+                        if self.collection_is_addressbook(path, meta).await {
                             ns.put("CARD".to_string(), NS_CARDDAV_URI.to_string());
                             children.push(supported_report_elem("CARD", "addressbook-query"));
                             children.push(supported_report_elem("CARD", "addressbook-multiget"));
@@ -1051,13 +1063,13 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                             elem.children.push(XMLNode::Element(dir));
 
                             #[cfg(feature = "caldav")]
-                            if meta.is_calendar(path) {
+                            if self.collection_is_calendar(path, meta).await {
                                 let calendar = Element::new2("C:calendar");
                                 elem.children.push(XMLNode::Element(calendar));
                             }
 
                             #[cfg(feature = "carddav")]
-                            if meta.is_addressbook(path) {
+                            if self.collection_is_addressbook(path, meta).await {
                                 let addressbook = Element::new2("CARD:addressbook");
                                 elem.children.push(XMLNode::Element(addressbook));
                             }
@@ -1139,7 +1151,7 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                         status: StatusCode::OK,
                         element: elem,
                     });
-                } else if meta.is_calendar(path) {
+                } else if self.collection_is_calendar(path, meta).await {
                     match prop.name.as_str() {
                         "supported-calendar-component-set" => {
                             let components = vec![
@@ -1209,7 +1221,7 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                         status: StatusCode::OK,
                         element: elem,
                     });
-                } else if meta.is_addressbook(path) {
+                } else if self.collection_is_addressbook(path, meta).await {
                     match prop.name.as_str() {
                         "supported-address-data" => {
                             let elem = create_supported_address_data();

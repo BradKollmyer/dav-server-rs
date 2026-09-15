@@ -63,7 +63,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         let path = self.path(req);
         let parent = path.parent();
         if let Ok(meta) = self.fs.metadata(&parent, &self.credentials).await
-            && meta.is_addressbook(&parent)
+            && self.collection_is_addressbook(&parent, meta.as_ref()).await
         {
             return Err(DavError::Status(StatusCode::FORBIDDEN));
         }

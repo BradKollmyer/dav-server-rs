@@ -1247,6 +1247,131 @@ END:VCALENDAR"#;
             "missing /calendars/ href: {body_str}"
         );
     }
+
+    /// MemFs wrapper that keeps dead props but uses default `mark_calendar`
+    /// (metadata `is_calendar` stays false).
+    #[cfg(feature = "proppatch")]
+    #[derive(Clone)]
+    struct DeadPropCalFs(dav_server::memfs::MemFs);
+
+    #[cfg(feature = "proppatch")]
+    impl DeadPropCalFs {
+        fn new() -> Box<Self> {
+            Box::new(Self(*dav_server::memfs::MemFs::new()))
+        }
+    }
+
+    #[cfg(feature = "proppatch")]
+    impl dav_server::fs::DavFileSystem for DeadPropCalFs {
+        fn open<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+            options: dav_server::fs::OpenOptions,
+        ) -> dav_server::fs::FsFuture<'a, Box<dyn dav_server::fs::DavFile>> {
+            self.0.open(path, options)
+        }
+
+        fn read_dir<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+            meta: dav_server::fs::ReadDirMeta,
+        ) -> dav_server::fs::FsFuture<
+            'a,
+            dav_server::fs::FsStream<Box<dyn dav_server::fs::DavDirEntry>>,
+        > {
+            self.0.read_dir(path, meta)
+        }
+
+        fn metadata<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+        ) -> dav_server::fs::FsFuture<'a, Box<dyn dav_server::fs::DavMetaData>> {
+            self.0.metadata(path)
+        }
+
+        fn symlink_metadata<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+        ) -> dav_server::fs::FsFuture<'a, Box<dyn dav_server::fs::DavMetaData>> {
+            self.0.symlink_metadata(path)
+        }
+
+        fn create_dir<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+        ) -> dav_server::fs::FsFuture<'a, ()> {
+            self.0.create_dir(path)
+        }
+
+        fn have_props<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            self.0.have_props(path)
+        }
+
+        fn patch_props<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+            patch: Vec<(bool, dav_server::fs::DavProp)>,
+        ) -> dav_server::fs::FsFuture<'a, Vec<(StatusCode, dav_server::fs::DavProp)>> {
+            self.0.patch_props(path, patch)
+        }
+
+        fn get_props<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+            do_content: bool,
+        ) -> dav_server::fs::FsFuture<'a, Vec<dav_server::fs::DavProp>> {
+            self.0.get_props(path, do_content)
+        }
+
+        fn get_prop<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+            prop: dav_server::fs::DavProp,
+        ) -> dav_server::fs::FsFuture<'a, Vec<u8>> {
+            self.0.get_prop(path, prop)
+        }
+    }
+
+    #[cfg(feature = "proppatch")]
+    #[tokio::test]
+    async fn test_mkcalendar_dead_prop_marker_is_calendar() {
+        let server = DavHandler::builder()
+            .filesystem(DeadPropCalFs::new())
+            .locksystem(FakeLs::new())
+            .build_handler();
+        mkcol(&server, "/calendars").await;
+
+        let req = Request::builder()
+            .method("MKCALENDAR")
+            .uri("/calendars/prop-cal")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <D:resourcetype/>
+  </D:prop>
+</D:propfind>"#;
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/calendars/prop-cal")
+            .header("Depth", "0")
+            .body(Body::from(propfind_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("<C:calendar"),
+            "MKCALENDAR on a prop-only filesystem must still be a calendar: {body_str}"
+        );
+    }
 }
 
 #[cfg(all(not(feature = "caldav"), feature = "memfs"))]

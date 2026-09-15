@@ -404,11 +404,11 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         let parent = path.parent();
         let meta = self.fs.metadata(&parent, &self.credentials).await.ok()?;
         #[cfg(feature = "caldav")]
-        if meta.is_calendar(&parent) {
+        if self.collection_is_calendar(&parent, meta.as_ref()).await {
             return Some(TypedCollection::Calendar);
         }
         #[cfg(feature = "carddav")]
-        if meta.is_addressbook(&parent) {
+        if self.collection_is_addressbook(&parent, meta.as_ref()).await {
             return Some(TypedCollection::Addressbook);
         }
         None
@@ -444,11 +444,11 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         let parent = path.parent();
         if let Ok(meta) = self.fs.metadata(&parent, &self.credentials).await {
             #[cfg(feature = "caldav")]
-            if meta.is_calendar(&parent) {
+            if self.collection_is_calendar(&parent, meta.as_ref()).await {
                 return Some(crate::caldav::DEFAULT_MAX_RESOURCE_SIZE);
             }
             #[cfg(feature = "carddav")]
-            if meta.is_addressbook(&parent) {
+            if self.collection_is_addressbook(&parent, meta.as_ref()).await {
                 return Some(crate::carddav::DEFAULT_MAX_RESOURCE_SIZE);
             }
         }

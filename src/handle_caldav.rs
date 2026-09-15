@@ -140,7 +140,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         let parent = path.parent();
         if let Ok(meta) = self.fs.metadata(&parent, &self.credentials).await
-            && meta.is_calendar(&parent)
+            && self.collection_is_calendar(&parent, meta.as_ref()).await
         {
             return Err(DavError::Status(StatusCode::FORBIDDEN));
         }

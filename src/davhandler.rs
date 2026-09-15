@@ -407,6 +407,26 @@ where
             .unwrap_or(false)
     }
 
+    /// True if metadata or a stored CalDAV marker property says this is a calendar.
+    #[cfg(feature = "caldav")]
+    pub(crate) async fn collection_is_calendar(
+        &self,
+        path: &DavPath,
+        meta: &dyn DavMetaData,
+    ) -> bool {
+        meta_or_prop_is_calendar(self.fs.as_ref(), path, meta, &self.credentials).await
+    }
+
+    /// True if metadata or a stored CardDAV marker property says this is an address book.
+    #[cfg(feature = "carddav")]
+    pub(crate) async fn collection_is_addressbook(
+        &self,
+        path: &DavPath,
+        meta: &dyn DavMetaData,
+    ) -> bool {
+        meta_or_prop_is_addressbook(self.fs.as_ref(), path, meta, &self.credentials).await
+    }
+
     // helper.
     pub(crate) fn path(&self, req: &Request<()>) -> DavPath {
         // This never fails (has been checked before)

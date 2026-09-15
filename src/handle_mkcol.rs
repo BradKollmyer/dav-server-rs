@@ -84,11 +84,12 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             let parent = path.parent();
             if let Ok(meta) = self.fs.metadata(&parent, &self.credentials).await {
                 #[cfg(feature = "caldav")]
-                if want_calendar && meta.is_calendar(&parent) {
+                if want_calendar && self.collection_is_calendar(&parent, meta.as_ref()).await {
                     return Err(DavError::Status(StatusCode::FORBIDDEN));
                 }
                 #[cfg(feature = "carddav")]
-                if want_addressbook && meta.is_addressbook(&parent) {
+                if want_addressbook && self.collection_is_addressbook(&parent, meta.as_ref()).await
+                {
                     return Err(DavError::Status(StatusCode::FORBIDDEN));
                 }
             }
