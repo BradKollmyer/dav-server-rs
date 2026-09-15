@@ -392,21 +392,29 @@ fn lookup_node(tree: &Tree, path: &DavPath) -> Option<u64> {
     Some(node_id)
 }
 
-// Find all locks in a path
+// Locks on the request path, plus Depth: infinity locks on ancestors.
 fn list_locks(tree: &Tree, path: &DavPath) -> Vec<DavLock> {
     let mut locks = Vec::new();
 
+    let segs = path_to_segs(path, true);
+    let last_seg = segs.len() - 1;
+
     let mut node_id = tree::ROOT_ID;
-    if let Ok(node) = tree.get_node(node_id) {
-        locks.extend_from_slice(node);
-    }
-    for seg in path_to_segs(path, false) {
-        node_id = match tree.get_child(node_id, seg) {
+    for (i, seg) in segs.into_iter().enumerate() {
+        node_id = match get_child(tree, node_id, seg) {
             Ok(n) => n,
             Err(_) => break,
         };
-        if let Ok(node) = tree.get_node(node_id) {
-            locks.extend_from_slice(node);
+        let node = match tree.get_node(node_id) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        for lock in node {
+            // Depth:0 ancestor locks do not cover this resource.
+            if i < last_seg && !lock.deep {
+                continue;
+            }
+            locks.push(lock.clone());
         }
     }
     locks
@@ -494,5 +502,39 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].token, lock.token);
         assert!(ready(ls.lock(&p, None, None, None, false, false)).is_err());
+    }
+
+    #[test]
+    fn discover_omits_depth_zero_ancestor_lock() {
+        let ls = MemLs::new();
+        let root = DavPath::new("/").unwrap();
+        let child = DavPath::new("/child").unwrap();
+        let lock = ready(ls.lock(&root, None, None, None, false, false)).unwrap();
+
+        let found = ready(ls.discover(&child));
+        assert!(!found.iter().any(|l| l.token == lock.token));
+    }
+
+    #[test]
+    fn discover_includes_deep_ancestor_lock() {
+        let ls = MemLs::new();
+        let root = DavPath::new("/").unwrap();
+        let child = DavPath::new("/child").unwrap();
+        let lock = ready(ls.lock(&root, None, None, None, false, true)).unwrap();
+
+        let found = ready(ls.discover(&child));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].token, lock.token);
+    }
+
+    #[test]
+    fn discover_includes_lock_on_request_path() {
+        let ls = MemLs::new();
+        let child = DavPath::new("/child").unwrap();
+        let lock = ready(ls.lock(&child, None, None, None, false, false)).unwrap();
+
+        let found = ready(ls.discover(&child));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].token, lock.token);
     }
 }
