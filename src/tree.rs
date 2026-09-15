@@ -172,7 +172,13 @@ impl<K: Eq + Hash + Debug + Clone, D: Debug> Tree<K, D> {
         for c in children.into_iter() {
             self.delete_subtree(c)?;
         }
-        self.delete_node_from_parent(id)
+        self.delete_node_from_parent(id)?;
+        // Unlinking is not enough: leave nodes in the map and MemLs locks leak.
+        // Root stays so unlock-at-/ still has a node to attach to.
+        if id != ROOT_ID {
+            self.nodes.remove(&id);
+        }
+        Ok(())
     }
 
     /// Move a node to a new position and new name in the tree.
@@ -275,6 +281,30 @@ mod tests {
             t.get_child(ROOT_ID, &"lock").unwrap_err(),
             FsError::NotFound
         );
+    }
+
+    #[test]
+    fn delete_subtree_removes_nodes() {
+        let mut t = tree();
+        let child = t.add_child(ROOT_ID, "a", 1, false).unwrap();
+        let grandchild = t.add_child(child, "b", 2, false).unwrap();
+        t.delete_subtree(child).unwrap();
+        assert_eq!(t.get_node(child).unwrap_err(), FsError::NotFound);
+        assert_eq!(t.get_node(grandchild).unwrap_err(), FsError::NotFound);
+        assert!(t.get_node(ROOT_ID).is_ok());
+        assert_eq!(t.get_child(ROOT_ID, &"a").unwrap_err(), FsError::NotFound);
+    }
+
+    #[test]
+    fn delete_subtree_on_root_clears_children_but_keeps_root() {
+        let mut t = tree();
+        let child = t.add_child(ROOT_ID, "a", 1, false).unwrap();
+        let grandchild = t.add_child(child, "b", 2, false).unwrap();
+        t.delete_subtree(ROOT_ID).unwrap();
+        assert!(t.get_node(ROOT_ID).is_ok());
+        assert_eq!(t.get_node(child).unwrap_err(), FsError::NotFound);
+        assert_eq!(t.get_node(grandchild).unwrap_err(), FsError::NotFound);
+        assert_eq!(t.get_child(ROOT_ID, &"a").unwrap_err(), FsError::NotFound);
     }
 
     #[cfg(feature = "memfs")]
