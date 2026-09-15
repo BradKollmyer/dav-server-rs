@@ -24,8 +24,8 @@ struct Range {
 }
 
 const BOUNDARY: &str = "BOUNDARY";
-const BOUNDARY_START: &str = "\n--BOUNDARY\n";
-const BOUNDARY_END: &str = "\n--BOUNDARY--\n";
+const BOUNDARY_START: &str = "\r\n--BOUNDARY\r\n";
+const BOUNDARY_END: &str = "\r\n--BOUNDARY--\r\n";
 
 const READ_BUF_SIZE: usize = 16384;
 
@@ -296,15 +296,15 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     if multipart {
                         let mut hdrs = Vec::new();
                         let _ = write!(hdrs, "{BOUNDARY_START}");
-                        let _ = writeln!(
+                        let _ = write!(
                             hdrs,
-                            "Content-Range: bytes {}-{}/{}",
+                            "Content-Range: bytes {}-{}/{}\r\n",
                             range.start,
                             range.start + range.count - 1,
                             len
                         );
-                        let _ = writeln!(hdrs, "Content-Type: {content_type}");
-                        let _ = writeln!(hdrs);
+                        let _ = write!(hdrs, "Content-Type: {content_type}\r\n");
+                        let _ = write!(hdrs, "\r\n");
                         tx.send(Bytes::from(hdrs)).await;
                     }
 

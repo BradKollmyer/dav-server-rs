@@ -164,6 +164,86 @@ mod dav_tests {
 }
 
 #[cfg(feature = "memfs")]
+mod multipart_range_tests {
+    use dav_server::{DavHandler, body::Body, fakels::FakeLs, memfs::MemFs};
+    use http::{Request, StatusCode};
+
+    fn setup() -> DavHandler {
+        DavHandler::builder()
+            .filesystem(MemFs::new())
+            .locksystem(FakeLs::new())
+            .build_handler()
+    }
+
+    async fn resp_to_string(mut resp: http::Response<Body>) -> String {
+        use futures_util::StreamExt;
+
+        let mut data = Vec::new();
+        let body = resp.body_mut();
+
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => data.extend_from_slice(&bytes),
+                Err(e) => panic!("Error reading body stream: {}", e),
+            }
+        }
+
+        String::from_utf8(data).unwrap_or_else(|_| "".to_string())
+    }
+
+    #[tokio::test]
+    async fn multipart_range_uses_crlf_delimiters() {
+        let server = setup();
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/range.txt")
+                    .body(Body::from("abc"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let resp = server
+            .handle(
+                Request::builder()
+                    .method("GET")
+                    .uri("/range.txt")
+                    .header("Range", "bytes=0-0,2-2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            content_type.contains("multipart/byteranges"),
+            "expected multipart/byteranges, got {content_type}"
+        );
+
+        let body = resp_to_string(resp).await;
+        assert!(
+            body.contains("\r\n--BOUNDARY\r\n"),
+            "missing CRLF multipart delimiter in {body:?}"
+        );
+        assert!(
+            !body.contains("\n--BOUNDARY\n"),
+            "Unix-newline delimiter must not be used: {body:?}"
+        );
+        assert!(
+            body.contains("\r\n--BOUNDARY--\r\n"),
+            "missing CRLF close-delimiter in {body:?}"
+        );
+    }
+}
+
+#[cfg(feature = "memfs")]
 mod oc_timestamp_tests {
     use dav_server::{DavHandler, body::Body, fakels::FakeLs, memfs::MemFs};
     use http::{Request, StatusCode};
