@@ -3516,6 +3516,37 @@ mod conditional_put_tests {
         );
         assert_eq!(get_body(&server, "/file.txt").await, "v2");
     }
+
+    #[tokio::test]
+    async fn get_with_lone_quote_if_none_match_does_not_panic() {
+        let server = setup();
+        assert_eq!(
+            put_star(&server, "/file.txt", "v1", "If-None-Match").await,
+            StatusCode::CREATED
+        );
+        for header_name in ["If-None-Match", "If-Match", "If-Range"] {
+            for value in ["\"", "W/\""] {
+                let status = server
+                    .handle(
+                        Request::builder()
+                            .method("GET")
+                            .uri("/file.txt")
+                            .header(header_name, value)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .status();
+                assert!(
+                    matches!(
+                        status,
+                        StatusCode::OK | StatusCode::BAD_REQUEST | StatusCode::PRECONDITION_FAILED
+                    ),
+                    "{header_name}: {value} -> {status}"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(feature = "memfs")]

@@ -499,7 +499,11 @@ impl FromStr for ETag {
         } else {
             (false, t)
         };
-        if s.starts_with('\"') && s.ends_with('\"') && !s[1..s.len() - 1].contains('\"') {
+        if s.len() >= 2
+            && s.starts_with('\"')
+            && s.ends_with('\"')
+            && !s[1..s.len() - 1].contains('\"')
+        {
             Ok(ETag {
                 tag: t.to_owned(),
                 weak,
@@ -1117,5 +1121,21 @@ mod tests {
             &uri("http://example.com:8080/a.txt"),
             &url("http://example.com/file")
         ));
+    }
+
+    #[test]
+    fn etag_lone_quote_is_invalid() {
+        assert!(ETag::from_str("\"").is_err());
+        assert!(ETag::from_str("W/\"").is_err());
+    }
+
+    #[test]
+    fn etag_empty_quoted_is_valid() {
+        let strong = ETag::from_str("\"\"").unwrap();
+        assert_eq!(strong.tag, "\"\"");
+        assert!(!strong.weak);
+        let weak = ETag::from_str("W/\"\"").unwrap();
+        assert_eq!(weak.tag, "W/\"\"");
+        assert!(weak.weak);
     }
 }
