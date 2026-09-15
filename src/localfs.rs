@@ -133,13 +133,6 @@ enum Meta {
     Fs(LocalFs),
 }
 
-/// Helper function to create directory on basedir
-#[allow(unused)]
-fn helper_create_directory(basedir: &Path, _new_dir_name: &str) {
-    let new_path = basedir.join(_new_dir_name);
-    let _ = std::fs::create_dir_all(&new_path);
-}
-
 /// Open a file or directory with enough access to change timestamps.
 fn open_for_times(path: &Path) -> io::Result<std::fs::File> {
     #[cfg(windows)]
@@ -250,12 +243,6 @@ impl LocalFs {
     ) -> Box<LocalFs> {
         let basedir = base.as_ref().to_path_buf();
 
-        #[cfg(feature = "caldav")]
-        helper_create_directory(&basedir, crate::caldav::DEFAULT_CALDAV_NAME);
-
-        #[cfg(feature = "carddav")]
-        helper_create_directory(&basedir, crate::carddav::DEFAULT_CARDDAV_NAME);
-
         let inner = LocalFsInner {
             canonical_basedir: init_canonical_basedir(&basedir),
             basedir,
@@ -304,12 +291,6 @@ impl LocalFs {
         fs_access_guard: Option<Box<dyn Fn() -> Box<dyn Any> + Send + Sync + 'static>>,
     ) -> Box<LocalFs> {
         let basedir = base.as_ref().to_path_buf();
-
-        #[cfg(feature = "caldav")]
-        helper_create_directory(&basedir, crate::caldav::DEFAULT_CALDAV_NAME);
-
-        #[cfg(feature = "carddav")]
-        helper_create_directory(&basedir, crate::carddav::DEFAULT_CARDDAV_NAME);
 
         let inner = LocalFsInner {
             canonical_basedir: init_canonical_basedir(&basedir),
@@ -1299,21 +1280,6 @@ mod tests {
         }
         assert!(found, "symlink directory entry not found");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn helper_create_directory_does_not_panic_when_create_fails() {
-        let tmp = std::env::temp_dir().join(format!(
-            "dav-mkdir-fail-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::write(&tmp, b"not a directory").unwrap();
-        helper_create_directory(&tmp, "calendars");
-        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]

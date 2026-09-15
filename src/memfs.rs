@@ -87,31 +87,7 @@ struct MemFsFile {
 impl MemFs {
     /// Create a new "memfs" filesystem.
     pub fn new() -> Box<MemFs> {
-        #[allow(unused_mut)]
-        let mut tree = Tree::new(MemFsNode::new_dir());
-
-        #[cfg(feature = "caldav")]
-        {
-            tree.add_child(
-                tree::ROOT_ID,
-                b"calendars".to_vec(),
-                MemFsNode::new_dir(),
-                false,
-            )
-            .unwrap();
-        }
-
-        #[cfg(feature = "carddav")]
-        {
-            tree.add_child(
-                tree::ROOT_ID,
-                b"addressbooks".to_vec(),
-                MemFsNode::new_dir(),
-                false,
-            )
-            .unwrap();
-        }
-
+        let tree = Tree::new(MemFsNode::new_dir());
         Box::new(MemFs {
             tree: Arc::new(Mutex::new(tree)),
         })

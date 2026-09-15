@@ -3,11 +3,23 @@ mod carddav_tests {
     use dav_server::{DavHandler, body::Body, carddav::*, fakels::FakeLs, memfs::MemFs};
     use http::{Method, Request, StatusCode};
 
-    fn setup_carddav_server() -> DavHandler {
-        DavHandler::builder()
+    async fn mkcol(server: &DavHandler, uri: &str) {
+        let req = Request::builder()
+            .method("MKCOL")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED, "MKCOL {uri}");
+    }
+
+    async fn setup_carddav_server() -> DavHandler {
+        let server = DavHandler::builder()
             .filesystem(MemFs::new())
             .locksystem(FakeLs::new())
-            .build_handler()
+            .build_handler();
+        mkcol(&server, "/addressbooks").await;
+        server
     }
 
     async fn resp_to_string(mut resp: http::Response<Body>) -> String {
@@ -28,7 +40,7 @@ mod carddav_tests {
 
     #[tokio::test]
     async fn test_carddav_options() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         let req = Request::builder()
             .method(Method::OPTIONS)
@@ -46,7 +58,7 @@ mod carddav_tests {
 
     #[tokio::test]
     async fn test_extended_mkcol_creates_addressbook() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <D:mkcol xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
@@ -92,7 +104,7 @@ mod carddav_tests {
 
     #[tokio::test]
     async fn test_mkaddressbook() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         let req = Request::builder()
             .method("MKADDRESSBOOK")
@@ -106,7 +118,7 @@ mod carddav_tests {
 
     #[tokio::test]
     async fn test_mkaddressbook_already_exists() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         // First create a regular collection
         let req = Request::builder()
@@ -129,7 +141,7 @@ mod carddav_tests {
 
     #[tokio::test]
     async fn test_mkaddressbook_missing_parent() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         let req = Request::builder()
             .method("MKADDRESSBOOK")
@@ -143,7 +155,7 @@ mod carddav_tests {
 
     #[tokio::test]
     async fn test_mkaddressbook_invalid_body() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         let req = Request::builder()
             .method("MKADDRESSBOOK")
@@ -169,7 +181,7 @@ mod carddav_tests {
 
     #[tokio::test]
     async fn test_mkaddressbook_with_mkcol_xml() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <D:mkcol xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
@@ -219,7 +231,7 @@ mod carddav_tests {
 
     #[tokio::test]
     async fn test_addressbook_propfind() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         // Create an addressbook collection first
         let req = Request::builder()
@@ -259,7 +271,7 @@ mod carddav_tests {
 
     #[tokio::test]
     async fn test_nested_path_is_not_addressbook_collection() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         let req = Request::builder()
             .method("MKADDRESSBOOK")
@@ -305,7 +317,7 @@ mod carddav_tests {
 
     #[tokio::test]
     async fn test_supported_report_set_on_addressbook() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         let req = Request::builder()
             .method("MKADDRESSBOOK")
@@ -342,7 +354,7 @@ mod carddav_tests {
 
     #[tokio::test]
     async fn test_addressbook_home_set() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         // PROPFIND request for addressbook-home-set on / (principal unset)
         let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
@@ -378,7 +390,7 @@ mod carddav_tests {
 
     #[tokio::test]
     async fn test_vcard_put() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         // Create an addressbook collection first
         let req = Request::builder()
@@ -412,7 +424,7 @@ END:VCARD"#;
 
     #[tokio::test]
     async fn test_addressbook_query_report() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         // Create an addressbook collection
         let req = Request::builder()
@@ -464,7 +476,7 @@ END:VCARD"#;
 
     #[tokio::test]
     async fn test_addressbook_query_email_text_match_ignores_fn() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         let req = Request::builder()
             .method("MKADDRESSBOOK")
@@ -544,7 +556,7 @@ END:VCARD"#;
 
     #[tokio::test]
     async fn test_addressbook_multiget_report() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         // Create an addressbook collection
         let req = Request::builder()
@@ -627,7 +639,7 @@ END:VCARD"#;
 
     #[tokio::test]
     async fn test_addressbook_multiget_confines_hrefs_to_collection() {
-        let server = setup_carddav_server();
+        let server = setup_carddav_server().await;
 
         let req = Request::builder()
             .method("MKADDRESSBOOK")

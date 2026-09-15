@@ -4,16 +4,28 @@ mod caldav_tests {
     use http::response::Response;
     use http::{Method, Request, StatusCode};
 
-    fn setup_caldav_server() -> DavHandler {
-        DavHandler::builder()
+    async fn mkcol(server: &DavHandler, uri: &str) {
+        let req = Request::builder()
+            .method("MKCOL")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED, "MKCOL {uri}");
+    }
+
+    async fn setup_caldav_server() -> DavHandler {
+        let server = DavHandler::builder()
             .filesystem(dav_server::memfs::MemFs::new())
             // .filesystem(dav_server::localfs::LocalFs::new("/tmp", true, false, false))
             .locksystem(FakeLs::new())
-            .build_handler()
+            .build_handler();
+        mkcol(&server, "/calendars").await;
+        server
     }
 
     async fn setup_caldav_server2() -> DavHandler {
-        let server = setup_caldav_server();
+        let server = setup_caldav_server().await;
 
         let req = Request::builder()
             .method("MKCALENDAR")
@@ -101,7 +113,7 @@ END:VCALENDAR"
 
     #[tokio::test]
     async fn test_caldav_options() {
-        let server = setup_caldav_server();
+        let server = setup_caldav_server().await;
 
         let req = Request::builder()
             .method(Method::OPTIONS)
@@ -119,7 +131,7 @@ END:VCALENDAR"
 
     #[tokio::test]
     async fn test_mkcalendar() {
-        let server = setup_caldav_server();
+        let server = setup_caldav_server().await;
 
         let req = Request::builder()
             .method("MKCALENDAR")
@@ -133,7 +145,7 @@ END:VCALENDAR"
 
     #[tokio::test]
     async fn test_mkcalendar_outside_calendars_prefix_is_calendar() {
-        let server = setup_caldav_server();
+        let server = setup_caldav_server().await;
 
         let req = Request::builder()
             .method("MKCOL")
@@ -175,7 +187,7 @@ END:VCALENDAR"
 
     #[tokio::test]
     async fn test_mkcol_under_calendars_is_not_calendar() {
-        let server = setup_caldav_server();
+        let server = setup_caldav_server().await;
 
         let req = Request::builder()
             .method("MKCOL")
@@ -213,7 +225,7 @@ END:VCALENDAR"
 
     #[tokio::test]
     async fn test_mkcol_garbage_body_is_bad_request() {
-        let server = setup_caldav_server();
+        let server = setup_caldav_server().await;
 
         let req = Request::builder()
             .method("MKCOL")
@@ -242,7 +254,7 @@ END:VCALENDAR"
 
     #[tokio::test]
     async fn test_mkcalendar_missing_parent_is_conflict() {
-        let server = setup_caldav_server();
+        let server = setup_caldav_server().await;
 
         let req = Request::builder()
             .method("MKCALENDAR")
@@ -256,7 +268,7 @@ END:VCALENDAR"
 
     #[tokio::test]
     async fn test_mkcalendar_garbage_body_is_bad_request() {
-        let server = setup_caldav_server();
+        let server = setup_caldav_server().await;
 
         let req = Request::builder()
             .method("MKCALENDAR")
@@ -270,7 +282,7 @@ END:VCALENDAR"
 
     #[tokio::test]
     async fn test_mkcalendar_sets_displayname() {
-        let server = setup_caldav_server();
+        let server = setup_caldav_server().await;
 
         let mkcalendar_body = r#"<?xml version="1.0" encoding="utf-8" ?>
 <C:mkcalendar xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
@@ -503,6 +515,8 @@ END:VCALENDAR"
             .locksystem(FakeLs::new())
             .strip_prefix("/dav")
             .build_handler();
+
+        mkcol(&server, "/dav/calendars").await;
 
         let req = Request::builder()
             .method("MKCALENDAR")
@@ -940,7 +954,7 @@ END:VCALENDAR"#;
 
     #[tokio::test]
     async fn test_current_user_principal_without_principal() {
-        let server = setup_caldav_server();
+        let server = setup_caldav_server().await;
 
         let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
 <D:propfind xmlns:D="DAV:">
@@ -975,7 +989,7 @@ END:VCALENDAR"#;
 
     #[tokio::test]
     async fn test_calendars_specific_propfind_omits_home_set() {
-        let server = setup_caldav_server();
+        let server = setup_caldav_server().await;
 
         let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
 <D:propfind xmlns:D="DAV:">
@@ -1047,7 +1061,7 @@ END:VCALENDAR"#;
 
     #[tokio::test]
     async fn test_calendar_home_set_on_root_without_principal() {
-        let server = setup_caldav_server();
+        let server = setup_caldav_server().await;
 
         let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
 <D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
