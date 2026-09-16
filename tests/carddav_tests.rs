@@ -841,6 +841,65 @@ END:VCARD"#;
     }
 
     #[tokio::test]
+    async fn test_addressbook_multiget_getetag_only_omits_address_data() {
+        let server = setup_carddav_server().await;
+
+        let req = Request::builder()
+            .method("MKADDRESSBOOK")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::empty())
+            .unwrap();
+        let _ = server.handle(req).await;
+
+        let vcard_data = r#"BEGIN:VCARD
+VERSION:3.0
+UID:contact-001@example.com
+FN:John Doe
+N:Doe;John;;;
+EMAIL:john.doe@example.com
+END:VCARD"#;
+
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/addressbooks/my-contacts/contact1.vcf")
+            .header("Content-Type", "text/vcard")
+            .body(Body::from(vcard_data))
+            .unwrap();
+        let _ = server.handle(req).await;
+
+        let report_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<CARD:addressbook-multiget xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
+  <D:prop>
+    <D:getetag/>
+  </D:prop>
+  <D:href>/addressbooks/my-contacts/contact1.vcf</D:href>
+</CARD:addressbook-multiget>"#;
+
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::from(report_body))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("getetag"),
+            "getetag-only multiget must return getetag: {body_str}"
+        );
+        assert!(
+            !body_str.contains("address-data"),
+            "getetag-only multiget must not return address-data: {body_str}"
+        );
+        assert!(
+            !body_str.contains("John Doe"),
+            "getetag-only multiget must not return vCard content: {body_str}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_addressbook_multiget_confines_hrefs_to_collection() {
         let server = setup_carddav_server().await;
 

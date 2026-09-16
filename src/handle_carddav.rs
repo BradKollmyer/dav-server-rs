@@ -18,7 +18,10 @@ use crate::handle_props::PropWriter;
 
 enum ParsedCardDavReportType {
     AddressBookQuery(ParsedAddressBookQuery),
-    AddressBookMultiget { hrefs: Vec<String> },
+    AddressBookMultiget {
+        hrefs: Vec<String>,
+        properties: Vec<String>,
+    },
 }
 
 fn filter_test(elem: &Element) -> DavResult<FilterTest> {
@@ -92,8 +95,9 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                 self.handle_addressbook_query(&path, meta.is_dir(), depth, query)
                     .await
             }
-            ParsedCardDavReportType::AddressBookMultiget { hrefs } => {
-                self.handle_addressbook_multiget(&path, hrefs).await
+            ParsedCardDavReportType::AddressBookMultiget { hrefs, properties } => {
+                self.handle_addressbook_multiget(&path, hrefs, properties)
+                    .await
             }
         }
     }
@@ -148,7 +152,19 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             }
             "addressbook-multiget" => {
                 let hrefs = hrefs_from(root);
-                Ok(ParsedCardDavReportType::AddressBookMultiget { hrefs })
+                let mut properties = Vec::new();
+                for child in &root.children {
+                    if let XMLNode::Element(elem) = child
+                        && elem.name == "prop"
+                    {
+                        for prop_child in &elem.children {
+                            if let XMLNode::Element(prop_elem) = prop_child {
+                                properties.push(prop_elem.name.clone());
+                            }
+                        }
+                    }
+                }
+                Ok(ParsedCardDavReportType::AddressBookMultiget { hrefs, properties })
             }
             _ => Err(DavError::StatusClose(StatusCode::BAD_REQUEST)),
         }
@@ -326,6 +342,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         &self,
         path: &DavPath,
         hrefs: Vec<String>,
+        requested_props: Vec<String>,
     ) -> DavResult<Response<Body>> {
         let mut results = Vec::new();
         let mut missing_hrefs: Vec<String> = Vec::new();
@@ -351,7 +368,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             missing_hrefs.push(href.clone());
         }
 
-        self.generate_addressbook_multiget_response(results, missing_hrefs, Vec::new())
+        self.generate_addressbook_multiget_response(results, missing_hrefs, requested_props)
             .await
     }
 
