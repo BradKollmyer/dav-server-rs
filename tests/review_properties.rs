@@ -157,6 +157,46 @@ async fn property_and_report_etags_match_get_header() {
     }
 }
 
+#[tokio::test]
+async fn carddav_report_omits_empty_200_propstat() {
+    let server = DavHandler::builder()
+        .filesystem(dav_server::memfs::MemFs::new())
+        .build_handler();
+    assert_eq!(
+        request(&server, "MKADDRESSBOOK", "/people", "").await.0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        request(&server, "PUT", "/people/a.vcf", VCARD).await.0,
+        StatusCode::CREATED
+    );
+    let query = r#"<T:addressbook-query xmlns:T="urn:ietf:params:xml:ns:carddav" xmlns:D="DAV:"><D:prop><D:displayname/></D:prop></T:addressbook-query>"#;
+    let (status, xml) = request(&server, "REPORT", "/people", query).await;
+    assert_eq!(status, StatusCode::MULTI_STATUS, "{xml}");
+    let tree = xmltree::Element::parse(xml.as_bytes()).unwrap();
+    let response = tree.get_child("response").expect(xml.as_str());
+    assert!(
+        response
+            .get_child("href")
+            .unwrap()
+            .get_text()
+            .unwrap()
+            .contains("/people/a.vcf"),
+        "{xml}"
+    );
+    for child in &response.children {
+        if let xmltree::XMLNode::Element(elem) = child
+            && elem.name == "propstat"
+        {
+            let st = elem.get_child("status").unwrap().get_text().unwrap();
+            assert!(
+                !st.contains("200"),
+                "empty 200 propstat must not be emitted: {xml}"
+            );
+        }
+    }
+}
+
 #[cfg(feature = "proppatch")]
 fn creation_cases(property: &str) -> Vec<(&'static str, String)> {
     [

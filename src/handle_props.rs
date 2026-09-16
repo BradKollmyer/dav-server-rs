@@ -1548,32 +1548,36 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
             .text(p)
             .write_ev(&mut self.emitter)?;
 
-        self.emitter.write(XmlWEvent::start_element("D:propstat"))?;
-        self.emitter.write(XmlWEvent::start_element("D:prop"))?;
-
         // RFC 6352 8.6 / 10.3: absent <prop> means all report properties.
         let want =
             |name: &str| requested_props.is_empty() || requested_props.iter().any(|p| p == name);
+        let want_address_data = want("address-data");
+        let want_getetag = want("getetag");
 
-        if want("address-data") {
-            let mut elem = Element::new2("CARD:address-data").ns("CARD", NS_CARDDAV_URI);
-            elem.children.push(XMLNode::Text(vcard_data.to_string()));
-            elem.write_ev(&mut self.emitter)?;
-        }
+        if want_address_data || want_getetag {
+            self.emitter.write(XmlWEvent::start_element("D:propstat"))?;
+            self.emitter.write(XmlWEvent::start_element("D:prop"))?;
 
-        if want("getetag") {
-            Element::new2("D:getetag")
-                .text(etag)
+            if want_address_data {
+                let mut elem = Element::new2("CARD:address-data").ns("CARD", NS_CARDDAV_URI);
+                elem.children.push(XMLNode::Text(vcard_data.to_string()));
+                elem.write_ev(&mut self.emitter)?;
+            }
+
+            if want_getetag {
+                Element::new2("D:getetag")
+                    .text(etag)
+                    .write_ev(&mut self.emitter)?;
+            }
+
+            self.emitter.write(XmlWEvent::end_element())?; // D:prop
+
+            Element::new2("D:status")
+                .text("HTTP/1.1 200 OK".to_string())
                 .write_ev(&mut self.emitter)?;
+
+            self.emitter.write(XmlWEvent::end_element())?; // D:propstat
         }
-
-        self.emitter.write(XmlWEvent::end_element())?; // D:prop
-
-        Element::new2("D:status")
-            .text("HTTP/1.1 200 OK".to_string())
-            .write_ev(&mut self.emitter)?;
-
-        self.emitter.write(XmlWEvent::end_element())?; // D:propstat
         self.emitter.write(XmlWEvent::end_element())?; // D:response
 
         Ok(())
