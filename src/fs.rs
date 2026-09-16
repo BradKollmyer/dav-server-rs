@@ -353,6 +353,14 @@ pub trait DavFileSystem {
         notimplemented_fut!("remove_file")
     }
 
+    /// Whether two existing paths identify the same backend resource.
+    ///
+    /// COPY/MOVE use this before deleting an overwrite destination. Backends
+    /// with aliases (for example case-insensitive names) should override this.
+    fn same_resource<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, bool> {
+        Box::pin(future::ready(Ok(from == to)))
+    }
+
     /// Rename a file or directory.
     ///
     /// Source and destination must be the same type (file/dir).
@@ -602,6 +610,17 @@ where
         notimplemented_fut!("remove_file")
     }
 
+    /// Whether two existing paths identify the same backend resource.
+    /// Backends with aliases should override this to protect COPY/MOVE overwrites.
+    fn same_resource<'a>(
+        &'a self,
+        from: &'a DavPath,
+        to: &'a DavPath,
+        _credentials: &'a C,
+    ) -> FsFuture<'a, bool> {
+        Box::pin(future::ready(Ok(from == to)))
+    }
+
     /// Rename a file or directory.
     ///
     /// Source and destination must be the same type (file/dir).
@@ -834,6 +853,15 @@ impl<Fs: DavFileSystem + Clone + Send + Sync> GuardedFileSystem<()> for Fs {
 
     fn remove_file<'a>(&'a self, path: &'a DavPath, _credentials: &()) -> FsFuture<'a, ()> {
         DavFileSystem::remove_file(self, path)
+    }
+
+    fn same_resource<'a>(
+        &'a self,
+        from: &'a DavPath,
+        to: &'a DavPath,
+        _credentials: &'a (),
+    ) -> FsFuture<'a, bool> {
+        DavFileSystem::same_resource(self, from, to)
     }
 
     fn rename<'a>(

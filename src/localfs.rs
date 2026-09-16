@@ -649,6 +649,40 @@ impl DavFileSystem for LocalFs {
         .boxed()
     }
 
+    fn same_resource<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, bool> {
+        async move {
+            let from = self.fspath(from)?;
+            let to = self.fspath(to)?;
+            let this = self.clone();
+            self.blocking(move || {
+                let from = match this.confine_follow(&from) {
+                    Ok(path) => path,
+                    Err(FsError::NotFound) => return Ok(false),
+                    Err(e) => return Err(e),
+                };
+                let to = match this.confine_follow(&to) {
+                    Ok(path) => path,
+                    Err(FsError::NotFound) => return Ok(false),
+                    Err(e) => return Err(e),
+                };
+                if from == to {
+                    return Ok(true);
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    let from = std::fs::metadata(from)?;
+                    let to = std::fs::metadata(to)?;
+                    return Ok(from.dev() == to.dev() && from.ino() == to.ino());
+                }
+                #[cfg(not(unix))]
+                Ok(false)
+            })
+            .await
+        }
+        .boxed()
+    }
+
     fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
             trace!(

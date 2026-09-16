@@ -226,7 +226,15 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         // Copying or moving a collection into itself is impossible, and
         // deleting the destination first would destroy the source (or the
         // destination's own content) before the operation fails.
-        if path == dest || dest.is_in_collection(&path) || path.is_in_collection(&dest) {
+        if path == dest
+            || dest.is_in_collection(&path)
+            || path.is_in_collection(&dest)
+            || (exists
+                && self
+                    .fs
+                    .same_resource(&path, &dest, &self.credentials)
+                    .await?)
+        {
             return Err(StatusCode::FORBIDDEN.into());
         }
 
