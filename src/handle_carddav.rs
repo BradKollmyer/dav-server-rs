@@ -55,6 +55,27 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         let report_type = self.parse_carddav_report_request(root)?;
 
+        // RFC 6352 8.6-8.7: these reports are scoped to address book
+        // collections, and supported-report-set only advertises them there.
+        // addressbook-query must be addressed to an address book collection;
+        // addressbook-multiget may also be addressed to an address object
+        // resource inside an address book.
+        let meta = self.fs.metadata(&path, &self.credentials).await?;
+        let target_is_addressbook = if meta.is_dir() {
+            self.collection_is_addressbook(&path, meta.as_ref()).await
+        } else if matches!(report_type, ParsedCardDavReportType::AddressBookQuery(_)) {
+            false
+        } else {
+            let parent = path.parent();
+            match self.fs.metadata(&parent, &self.credentials).await {
+                Ok(pmeta) => self.collection_is_addressbook(&parent, pmeta.as_ref()).await,
+                Err(_) => false,
+            }
+        };
+        if !target_is_addressbook {
+            return Err(DavError::Status(StatusCode::FORBIDDEN));
+        }
+
         match report_type {
             ParsedCardDavReportType::AddressBookQuery(query) => {
                 self.handle_addressbook_query(&path, query).await
