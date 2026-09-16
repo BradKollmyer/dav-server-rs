@@ -68,10 +68,8 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         match report_type {
             CalDavReportType::CalendarQuery(query) => {
-                // RFC 4791 7.9: when no Depth header is present the query
-                // applies to the calendar collection's immediate members, as
-                // if Depth: 1 had been sent. Depth: 0 targets the collection
-                // resource itself (no match for a query).
+                // RFC 4791 7.8 assumes omitted Depth is 0. Default to 1 as an
+                // interoperability deviation so collection queries hit members.
                 let depth = req
                     .headers()
                     .typed_try_get::<davheaders::Depth>()
