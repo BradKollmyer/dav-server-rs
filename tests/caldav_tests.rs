@@ -2364,6 +2364,125 @@ END:VCALENDAR"#
             "PUT should look up the parent collection exactly once"
         );
     }
+
+    /// A calendar holding one good event plus two files the REPORTs must
+    /// skip: a plain-text file and an oversize .ics. PUT refuses both, so
+    /// they are written straight into the MemFs.
+    async fn setup_calendar_with_junk() -> DavHandler {
+        use bytes::Bytes;
+        use dav_server::davpath::DavPath;
+        use dav_server::fs::{DavFileSystem, OpenOptions};
+
+        let fs = dav_server::memfs::MemFs::new();
+        let server = DavHandler::builder()
+            .filesystem(fs.clone())
+            .locksystem(FakeLs::new())
+            .build_handler();
+        mkcol(&server, "/calendars").await;
+        let req = Request::builder()
+            .method("MKCALENDAR")
+            .uri("/calendars/my-calendar")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(server.handle(req).await.status(), StatusCode::CREATED);
+        let ics = create_ics_data("good-event", "Good Event");
+        let resp = put_ics_data(&server, ics, "/calendars/my-calendar/good.ics").await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Busy on a different day than the good event so it would show up
+        // as a second FREEBUSY period if it were not skipped.
+        let mut big = create_vevent_ics(
+            "big-event",
+            "Big Event",
+            "20240105T120000Z",
+            "20240105T130000Z",
+        );
+        big.push_str(&"X".repeat(DEFAULT_MAX_RESOURCE_SIZE as usize + 1));
+        for (name, data) in [
+            ("notes.txt", "just some notes".to_string()),
+            ("big.ics", big),
+        ] {
+            let path = DavPath::new(&format!("/calendars/my-calendar/{name}")).unwrap();
+            let oo = OpenOptions {
+                write: true,
+                create: true,
+                truncate: true,
+                ..OpenOptions::default()
+            };
+            let mut f = fs.open(&path, oo).await.unwrap();
+            f.write_bytes(Bytes::from(data)).await.unwrap();
+            f.flush().await.unwrap();
+        }
+        server
+    }
+
+    #[tokio::test]
+    async fn test_calendar_reports_skip_non_calendar_and_oversize_files() {
+        let server = setup_calendar_with_junk().await;
+
+        let query = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR"/>
+  </C:filter>
+</C:calendar-query>"#;
+        let (status, body_str) = report_calendar_query(&server, query).await;
+        assert_eq!(status, StatusCode::MULTI_STATUS);
+        assert!(
+            body_str.contains("Good Event"),
+            "good event missing: {body_str}"
+        );
+        assert!(
+            !body_str.contains("notes.txt") && !body_str.contains("big.ics"),
+            "junk must not be listed: {body_str}"
+        );
+
+        let multiget = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <D:href>/calendars/my-calendar/good.ics</D:href>
+  <D:href>/calendars/my-calendar/notes.txt</D:href>
+  <D:href>/calendars/my-calendar/big.ics</D:href>
+</C:calendar-multiget>"#;
+        let (status, body_str) = report_calendar_query(&server, multiget).await;
+        assert_eq!(status, StatusCode::MULTI_STATUS);
+        assert!(
+            body_str.contains("Good Event"),
+            "good event missing: {body_str}"
+        );
+        assert!(
+            !body_str.contains("Big Event") && !body_str.contains("just some notes"),
+            "junk content must not be returned: {body_str}"
+        );
+        assert_eq!(
+            body_str.matches("404 Not Found").count(),
+            2,
+            "notes.txt and big.ics must be 404: {body_str}"
+        );
+
+        let freebusy = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:free-busy-query xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <C:time-range start="20240101T000000Z" end="20240201T000000Z"/>
+</C:free-busy-query>"#;
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/calendars/my-calendar")
+            .body(Body::from(freebusy.to_string()))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_str = resp_to_string(resp).await;
+        assert_eq!(
+            body_str.matches("FREEBUSY:").count(),
+            1,
+            "only the good event is busy: {body_str}"
+        );
+    }
 }
 
 #[cfg(all(not(feature = "caldav"), feature = "memfs"))]

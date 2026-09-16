@@ -494,6 +494,34 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         read_file_to_end(file.as_mut(), n).await
     }
 
+    /// Load `path` as a calendar/address object for a REPORT: it must open
+    /// for reading, be at most `max` bytes long and pass `sniff`. Returns
+    /// its metadata and lossily decoded content, or `None` to skip it.
+    #[cfg(any(feature = "caldav", feature = "carddav"))]
+    pub(crate) async fn read_object_resource(
+        &self,
+        path: &DavPath,
+        max: u64,
+        sniff: fn(&[u8]) -> bool,
+    ) -> Option<(Box<dyn DavMetaData>, String)> {
+        let mut file = self
+            .fs
+            .open(path, OpenOptions::read(), &self.credentials)
+            .await
+            .ok()?;
+        let metadata = file.metadata().await.ok()?;
+        if metadata.len() > max {
+            return None;
+        }
+        let data = read_file_to_end(file.as_mut(), metadata.len() as usize)
+            .await
+            .ok()?;
+        if !sniff(&data) {
+            return None;
+        }
+        Some((metadata, String::from_utf8_lossy(&data).into_owned()))
+    }
+
     #[cfg(any(feature = "caldav", feature = "carddav"))]
     async fn restore_resource_bytes(&self, path: &DavPath, bytes: Vec<u8>) -> FsResult<()> {
         let mut oo = OpenOptions::write();

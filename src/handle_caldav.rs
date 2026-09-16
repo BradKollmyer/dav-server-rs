@@ -322,43 +322,28 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         query: CalendarQuery,
     ) -> DavResult<Response<Body>> {
         // Get directory listing
-        let stream = self
+        let mut stream = self
             .fs
             .read_dir(path, self.get_read_dir_meta(), &self.credentials)
             .await?;
         let mut results = Vec::new();
 
-        let items: Vec<_> = stream.collect().await;
-        for item in items {
-            match item {
-                Ok(dirent) => {
-                    if self.hidden_in_listing(dirent.as_ref()).await {
-                        continue;
-                    }
-                    let mut item_path = path.clone();
-                    item_path.push_segment(&dirent.name());
+        while let Some(item) = stream.next().await {
+            let Ok(dirent) = item else { continue };
+            if self.hidden_in_listing(dirent.as_ref()).await {
+                continue;
+            }
+            let mut item_path = path.clone();
+            item_path.push_segment(&dirent.name());
 
-                    // Check if this is a calendar resource, and append content to result
-                    if let Ok(mut file) = self
-                        .fs
-                        .open(&item_path, OpenOptions::read(), &self.credentials)
-                        .await
-                        && let Ok(metadata) = file.metadata().await
-                        && metadata.len() <= DEFAULT_MAX_RESOURCE_SIZE
-                        && let Ok(data) =
-                            read_file_to_end(file.as_mut(), metadata.len() as usize).await
-                        && is_calendar_data(&data)
-                    {
-                        let content = String::from_utf8_lossy(&data);
-
-                        if self.matches_query(&content, &query) {
-                            let etag = metadata.etag().unwrap_or_default().to_string();
-                            results.push((item_path.clone(), etag, content.to_string()));
-                            continue;
-                        }
-                    }
-                }
-                Err(_) => continue,
+            // Check if this is a calendar resource, and append content to result
+            if let Some((metadata, content)) = self
+                .read_object_resource(&item_path, DEFAULT_MAX_RESOURCE_SIZE, is_calendar_data)
+                .await
+                && self.matches_query(&content, &query)
+            {
+                let etag = metadata.etag().unwrap_or_default().to_string();
+                results.push((item_path, etag, content));
             }
         }
 
@@ -382,18 +367,12 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             if let Ok(item_path) = DavPath::from_str_and_prefix(href, &self.prefix)
                 && (item_path.is_in_collection(path) || item_path == *path)
                 && self.ensure_visible(&item_path).await.is_ok()
-                && let Ok(mut file) = self
-                    .fs
-                    .open(&item_path, OpenOptions::read(), &self.credentials)
+                && let Some((metadata, content)) = self
+                    .read_object_resource(&item_path, DEFAULT_MAX_RESOURCE_SIZE, is_calendar_data)
                     .await
-                && let Ok(metadata) = file.metadata().await
-                && metadata.len() <= DEFAULT_MAX_RESOURCE_SIZE
-                && let Ok(data) = read_file_to_end(file.as_mut(), metadata.len() as usize).await
-                && is_calendar_data(&data)
             {
                 let etag = metadata.etag().unwrap_or_default().to_string();
-                let content = String::from_utf8_lossy(&data);
-                results.push((item_path, etag, content.to_string()));
+                results.push((item_path, etag, content));
                 continue;
             }
 
@@ -413,14 +392,13 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             return Err(DavError::StatusClose(StatusCode::BAD_REQUEST));
         };
 
-        let stream = self
+        let mut stream = self
             .fs
             .read_dir(path, self.get_read_dir_meta(), &self.credentials)
             .await?;
         let mut busy = Vec::new();
 
-        let items: Vec<_> = stream.collect().await;
-        for item in items {
+        while let Some(item) = stream.next().await {
             let Ok(dirent) = item else { continue };
             if self.hidden_in_listing(dirent.as_ref()).await {
                 continue;
@@ -428,19 +406,12 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             let mut item_path = path.clone();
             item_path.push_segment(&dirent.name());
 
-            if let Ok(mut file) = self
-                .fs
-                .open(&item_path, OpenOptions::read(), &self.credentials)
+            if let Some((_, content)) = self
+                .read_object_resource(&item_path, DEFAULT_MAX_RESOURCE_SIZE, is_calendar_data)
                 .await
-                && let Ok(metadata) = file.metadata().await
-                && metadata.len() <= DEFAULT_MAX_RESOURCE_SIZE
-                && let Ok(data) = read_file_to_end(file.as_mut(), metadata.len() as usize).await
-                && is_calendar_data(&data)
+                && let Ok(calendar) = validate_calendar_data(&content)
             {
-                let content = String::from_utf8_lossy(&data);
-                if let Ok(calendar) = validate_calendar_data(&content) {
-                    busy.extend(calendar_busy_intervals(&calendar, range_start, range_end));
-                }
+                busy.extend(calendar_busy_intervals(&calendar, range_start, range_end));
             }
         }
 

@@ -201,15 +201,14 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         query: AddressBookQuery,
     ) -> DavResult<Response<Body>> {
         // Get directory listing
-        let stream = self
+        let mut stream = self
             .fs
             .read_dir(path, self.get_read_dir_meta(), &self.credentials)
             .await?;
         let mut results = Vec::new();
 
-        let items: Vec<_> = stream.collect().await;
         let mut count = 0u32;
-        for item in items {
+        while let Some(item) = stream.next().await {
             // Check limit
             if let Some(limit) = query.limit
                 && count >= limit
@@ -217,36 +216,22 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                 break;
             }
 
-            match item {
-                Ok(dirent) => {
-                    if self.hidden_in_listing(dirent.as_ref()).await {
-                        continue;
-                    }
-                    let mut item_path = path.clone();
-                    item_path.push_segment(&dirent.name());
+            let Ok(dirent) = item else { continue };
+            if self.hidden_in_listing(dirent.as_ref()).await {
+                continue;
+            }
+            let mut item_path = path.clone();
+            item_path.push_segment(&dirent.name());
 
-                    // Check if this is a vCard resource, and append content to result
-                    if let Ok(mut file) = self
-                        .fs
-                        .open(&item_path, OpenOptions::read(), &self.credentials)
-                        .await
-                        && let Ok(metadata) = file.metadata().await
-                        && metadata.len() <= DEFAULT_MAX_RESOURCE_SIZE
-                        && let Ok(data) =
-                            read_file_to_end(file.as_mut(), metadata.len() as usize).await
-                        && is_vcard_data(&data)
-                    {
-                        let content = String::from_utf8_lossy(&data);
-
-                        if self.matches_addressbook_query(&content, &query) {
-                            let etag = metadata.etag().unwrap_or_default().to_string();
-                            results.push((item_path.clone(), etag, content.to_string()));
-                            count += 1;
-                            continue;
-                        }
-                    }
-                }
-                Err(_) => continue,
+            // Check if this is a vCard resource, and append content to result
+            if let Some((metadata, content)) = self
+                .read_object_resource(&item_path, DEFAULT_MAX_RESOURCE_SIZE, is_vcard_data)
+                .await
+                && self.matches_addressbook_query(&content, &query)
+            {
+                let etag = metadata.etag().unwrap_or_default().to_string();
+                results.push((item_path, etag, content));
+                count += 1;
             }
         }
 
@@ -270,18 +255,12 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             if let Ok(item_path) = DavPath::from_str_and_prefix(href, &self.prefix)
                 && (item_path.is_in_collection(path) || item_path == *path)
                 && self.ensure_visible(&item_path).await.is_ok()
-                && let Ok(mut file) = self
-                    .fs
-                    .open(&item_path, OpenOptions::read(), &self.credentials)
+                && let Some((metadata, content)) = self
+                    .read_object_resource(&item_path, DEFAULT_MAX_RESOURCE_SIZE, is_vcard_data)
                     .await
-                && let Ok(metadata) = file.metadata().await
-                && metadata.len() <= DEFAULT_MAX_RESOURCE_SIZE
-                && let Ok(data) = read_file_to_end(file.as_mut(), metadata.len() as usize).await
-                && is_vcard_data(&data)
             {
                 let etag = metadata.etag().unwrap_or_default().to_string();
-                let content = String::from_utf8_lossy(&data);
-                results.push((item_path, etag, content.to_string()));
+                results.push((item_path, etag, content));
                 continue;
             }
 
