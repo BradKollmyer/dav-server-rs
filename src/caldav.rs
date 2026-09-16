@@ -9,7 +9,6 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, TimeZone,
 #[cfg(feature = "caldav")]
 use icalendar::{
     Calendar, CalendarComponent, CalendarDateTime, Component, DatePerhapsTime, EventLike, Property,
-    rrule,
 };
 use xmltree::Element;
 
@@ -728,24 +727,37 @@ fn event_occurrences_in_range(
     let Ok(set) = event.get_recurrence() else {
         return base_span();
     };
-    let Ok(tz) = calendar
+    if calendar
         .get_timezone()
         .unwrap_or("UTC")
         .parse::<chrono_tz::Tz>()
-    else {
+        .is_err()
+    {
         return base_span();
+    }
+    let tz = set.get_dt_start().timezone();
+    let window_in_tz = |utc: DateTime<Utc>| {
+        if tz.is_local() {
+            // DATE/floating are tagged LOCAL; wall-clock is UTC, matching `to_utc`.
+            tz.from_local_datetime(&utc.naive_utc())
+                .single()
+                .unwrap_or_else(|| tz.from_utc_datetime(&utc.naive_utc()))
+        } else {
+            tz.from_utc_datetime(&utc.naive_utc())
+        }
     };
-    let tz = rrule::Tz::from(tz);
     let window_start = range_start - duration;
-    let after_zoned = tz.from_utc_datetime(&window_start.naive_utc());
-    let before_zoned = tz.from_utc_datetime(&range_end.naive_utc());
-    set.after(after_zoned)
-        .before(before_zoned)
+    set.after(window_in_tz(window_start))
+        .before(window_in_tz(range_end))
         .all(MAX_OCCURRENCE_EXPANSION)
         .dates
         .into_iter()
         .map(|occ| {
-            let start = occ.with_timezone(&Utc);
+            let start = if occ.timezone().is_local() {
+                occ.naive_local().and_utc()
+            } else {
+                occ.with_timezone(&Utc)
+            };
             (start, start + duration)
         })
         .filter(|(start, end)| time_spans_overlap(*start, *end, Some(range_start), Some(range_end)))
@@ -1410,6 +1422,46 @@ mod tests {
                 "20240102T130000Z",
                 FreeBusyType::Busy
             )]
+        );
+    }
+
+    #[test]
+    fn date_recurring_vevent_busy_intervals_are_utc_days() {
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:1\nDTSTART;VALUE=DATE:20240101\nDTEND;VALUE=DATE:20240102\nRRULE:FREQ=DAILY;COUNT=3\nEND:VEVENT\nEND:VCALENDAR";
+        let cal = parse_ics(ics);
+        assert_eq!(
+            calendar_busy_intervals(
+                &cal,
+                parse_caldav_date_time("20240101T000000Z").unwrap(),
+                parse_caldav_date_time("20240201T000000Z").unwrap(),
+            ),
+            (1..=3)
+                .map(|d| busy(
+                    &format!("2024010{d}T000000Z"),
+                    &format!("2024010{}T000000Z", d + 1),
+                    FreeBusyType::Busy
+                ))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn floating_recurring_vevent_busy_intervals_are_utc() {
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:1\nDTSTART:20240101T120000\nDTEND:20240101T130000\nRRULE:FREQ=DAILY;COUNT=3\nEND:VEVENT\nEND:VCALENDAR";
+        let cal = parse_ics(ics);
+        assert_eq!(
+            calendar_busy_intervals(
+                &cal,
+                parse_caldav_date_time("20240101T000000Z").unwrap(),
+                parse_caldav_date_time("20240201T000000Z").unwrap(),
+            ),
+            (1..=3)
+                .map(|d| busy(
+                    &format!("2024010{d}T120000Z"),
+                    &format!("2024010{d}T130000Z"),
+                    FreeBusyType::Busy
+                ))
+                .collect::<Vec<_>>()
         );
     }
 
