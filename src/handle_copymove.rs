@@ -59,12 +59,18 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             }
 
             // Copying a directory onto an existing directory with Depth 0
-            // is not an error. It means "only copy properties" (which
-            // we do not do yet).
+            // is not an error. It means "only copy properties".
             if let Err(e) = self.fs.create_dir(dest, &self.credentials).await
                 && (depth != Depth::Zero || e != FsError::Exists)
             {
                 debug!("do_copy: self.fs.create_dir({dest}) error: {e:?}");
+                return add_status(multierror, dest, e).await;
+            }
+
+            if let Err(e) = self
+                .copy_collection_properties(source, dest, meta.as_ref())
+                .await
+            {
                 return add_status(multierror, dest, e).await;
             }
 
@@ -129,6 +135,46 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             retval
         }
         .boxed()
+    }
+
+    async fn copy_collection_properties(
+        &self,
+        source: &DavPath,
+        dest: &DavPath,
+        _meta: &dyn DavMetaData,
+    ) -> DavResult<()> {
+        // Collection type can live in backend metadata or an internal dead
+        // property. Preserve it explicitly, including on Depth: 0 copies.
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        let kind = self.collection_kind(source, _meta).await;
+        #[cfg(feature = "proppatch")]
+        if self.fs.have_props(source, &self.credentials).await {
+            let source_props = self.fs.get_props(source, true, &self.credentials).await?;
+            let dest_props = self.fs.get_props(dest, false, &self.credentials).await?;
+            let mut patch: Vec<_> = dest_props.into_iter().map(|p| (false, p)).collect();
+            patch.extend(source_props.into_iter().map(|p| (true, p)));
+            if !patch.is_empty() {
+                for (status, _) in self.fs.patch_props(dest, patch, &self.credentials).await? {
+                    if !status.is_success() {
+                        return Err(status.into());
+                    }
+                }
+            }
+        }
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        match kind {
+            #[cfg(feature = "caldav")]
+            CollectionKind::Calendar => self.fs.mark_calendar(dest, &self.credentials).await?,
+            #[cfg(feature = "carddav")]
+            CollectionKind::Addressbook => {
+                self.fs.mark_addressbook(dest, &self.credentials).await?
+            }
+            CollectionKind::None => {}
+        }
+        // These parameters are unused when neither properties nor typed
+        // collections are enabled.
+        let _ = (source, dest);
+        Ok(())
     }
 
     /// Validate an object against the destination collection before any overwrite.
@@ -319,6 +365,24 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                 .await
             {
                 return Err(StatusCode::LOCKED.into());
+            }
+        }
+
+        // Depth: 0 retains existing members. Changing their collection type
+        // would leave incompatible objects behind and may retain an old backend
+        // type flag or sidecar. Reject this before changing any properties.
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        if method == DavMethod::Copy
+            && depth == Depth::Zero
+            && meta.is_dir()
+            && exists
+            && !dest_is_file
+        {
+            let dest_meta = self.fs.metadata(&dest, &self.credentials).await?;
+            if self.collection_kind(&path, meta.as_ref()).await
+                != self.collection_kind(&dest, dest_meta.as_ref()).await
+            {
+                return Err(StatusCode::FORBIDDEN.into());
             }
         }
 
