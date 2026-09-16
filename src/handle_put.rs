@@ -190,6 +190,10 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                             return Err(DavError::StatusClose(SC::RANGE_NOT_SATISFIABLE));
                         }
                         start = m.len() - n;
+                    } else {
+                        // "replace the last n bytes" is meaningless on a file
+                        // that does not exist yet.
+                        return Err(DavError::StatusClose(SC::RANGE_NOT_SATISFIABLE));
                     }
                 }
                 davheaders::XUpdateRange::Append => {
