@@ -288,7 +288,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         }
 
         // Per-response multipart boundary (used only when ranges.len() > 1).
-        let boundary = multipart_boundary();
+        let boundary = (ranges.len() > 1).then(multipart_boundary);
 
         if !ranges.is_empty() {
             curpos = ranges[0].start;
@@ -304,7 +304,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                 );
                 res.headers_mut()
                     .insert("Content-Range", r.parse().unwrap());
-            } else {
+            } else if let Some(ref boundary) = boundary {
                 // add content-type header with the unique boundary.
                 let r = format!("multipart/byteranges; boundary={boundary}");
                 res.headers_mut().insert("Content-Type", r.parse().unwrap());
@@ -342,6 +342,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                 let zero = [0; 4096];
 
                 let multipart = ranges.len() > 1;
+                let boundary = boundary.unwrap_or_default();
                 for range in ranges {
                     trace!(
                         "handle_get: start = {}, count = {}",
