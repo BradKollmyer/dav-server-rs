@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::convert::TryFrom;
 use std::io::{self, Cursor};
 use std::sync::LazyLock;
 
@@ -472,7 +471,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                         }
                         // only here to make "litmus" happy, really...
                         if let Some(s) = prop.get_text()
-                            && davheaders::ContentLanguage::try_from(s.as_ref()).is_err()
+                            && !davheaders::valid_content_language(s.as_ref())
                         {
                             return StatusCode::CONFLICT;
                         }

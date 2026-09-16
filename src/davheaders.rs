@@ -19,7 +19,6 @@ pub static IF_MATCH: HeaderName = HeaderName::from_static("if-match");
 pub static IF_NONE_MATCH: HeaderName = HeaderName::from_static("if-none-match");
 pub static X_UPDATE_RANGE: HeaderName = HeaderName::from_static("x-update-range");
 pub static IF: HeaderName = HeaderName::from_static("if");
-pub static CONTENT_LANGUAGE: HeaderName = HeaderName::from_static("content-language");
 pub static X_OC_MTIME: HeaderName = HeaderName::from_static("x-oc-mtime");
 pub static X_OC_CTIME: HeaderName = HeaderName::from_static("x-oc-ctime");
 
@@ -199,54 +198,17 @@ impl Header for Depth {
     }
 }
 
-/// Content-Language header.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ContentLanguage(headers::Vary);
-
-impl ContentLanguage {
-    #[allow(dead_code)]
-    pub fn iter_langs(&self) -> impl Iterator<Item = &str> {
-        self.0.iter_strs()
+/// Rudimentary check whether `s` looks like a valid Content-Language
+/// value: a comma separated list of language tags.
+pub(crate) fn valid_content_language(s: &str) -> bool {
+    if HeaderValue::from_str(s).is_err() {
+        return false;
     }
-}
-
-impl TryFrom<&str> for ContentLanguage {
-    type Error = headers::Error;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let value = HeaderValue::from_str(value).map_err(map_invalid)?;
-        let mut values = std::iter::once(&value);
-        ContentLanguage::decode(&mut values)
-    }
-}
-
-impl Header for ContentLanguage {
-    fn name() -> &'static HeaderName {
-        &CONTENT_LANGUAGE
-    }
-
-    fn decode<'i, I>(values: &mut I) -> Result<Self, headers::Error>
-    where
-        I: Iterator<Item = &'i HeaderValue>,
-    {
-        let h = headers::Vary::decode(values)?;
-        for lang in h.iter_strs() {
-            let lang = lang.as_bytes();
-            // **VERY** rudimentary check ...
-            let ok = lang.len() == 2 || (lang.len() > 4 && lang[2] == b'-');
-            if !ok {
-                return Err(invalid());
-            }
-        }
-        Ok(ContentLanguage(h))
-    }
-
-    fn encode<E>(&self, values: &mut E)
-    where
-        E: Extend<HeaderValue>,
-    {
-        self.0.encode(values)
-    }
+    s.split(',').all(|lang| {
+        let lang = lang.trim().as_bytes();
+        // **VERY** rudimentary check ...
+        lang.len() == 2 || (lang.len() > 4 && lang[2] == b'-')
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1003,6 +965,20 @@ impl Header for If {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_language_validator() {
+        assert!(valid_content_language("en"));
+        assert!(valid_content_language("en-US"));
+        assert!(valid_content_language("en, nl-NL ,de"));
+        assert!(!valid_content_language(""));
+        assert!(!valid_content_language("e"));
+        assert!(!valid_content_language("eng"));
+        assert!(!valid_content_language("en_US"));
+        assert!(!valid_content_language("en,"));
+        assert!(!valid_content_language("en\nfr"));
+        assert!(!valid_content_language("\u{e9}n"));
+    }
 
     #[test]
     fn if_header() {
