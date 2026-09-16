@@ -704,13 +704,7 @@ impl DavFileSystem for LocalFs {
                     Ok(v) => Ok(v),
                     Err(e) => {
                         // webdav allows a rename from a directory to a file.
-                        //
-                        // Use symlink_metadata (do NOT follow symlinks): only a
-                        // genuine directory may take this delete-and-retry path.
-                        // A symlinked source must never cause us to delete the
-                        // destination. And propagate the delete error rather than
-                        // discarding it, so a failed removal doesn't get masked
-                        // by the retry.
+                        // Only a real directory may delete dest and retry.
                         let from_is_real_dir = std::fs::symlink_metadata(&frompath)
                             .map(|m| m.is_dir())
                             .unwrap_or(false);
