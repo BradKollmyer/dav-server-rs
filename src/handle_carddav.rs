@@ -330,12 +330,8 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         }
 
         // Generate multistatus response, honoring the requested prop set.
-        self.generate_addressbook_multiget_response(
-            results,
-            Vec::new(),
-            query.query.properties.clone(),
-        )
-        .await
+        self.generate_addressbook_multiget_response(results, Vec::new(), query.query.properties)
+            .await
     }
 
     async fn handle_addressbook_multiget(
