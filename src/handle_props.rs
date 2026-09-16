@@ -1553,7 +1553,8 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
 
         // When no <prop> was given the server returns all the report's
         // properties; otherwise only the requested ones (RFC 6352 10.6).
-        let want = |name: &str| requested_props.is_empty() || requested_props.iter().any(|p| p == name);
+        let want =
+            |name: &str| requested_props.is_empty() || requested_props.iter().any(|p| p == name);
 
         // Write address-data element with content, if requested.
         if want("address-data") {

@@ -29,7 +29,6 @@ fn multipart_boundary() -> String {
     format!("dav-server-{}", uuid::Uuid::new_v4().simple())
 }
 
-
 const READ_BUF_SIZE: usize = 16384;
 
 impl<C: Clone + Send + Sync + 'static> DavInner<C> {
@@ -391,7 +390,8 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     }
                 }
                 if multipart {
-                    tx.send(Bytes::from(format!("\r\n--{boundary}--\r\n"))).await;
+                    tx.send(Bytes::from(format!("\r\n--{boundary}--\r\n")))
+                        .await;
                 }
                 Ok::<(), std::io::Error>(())
             }
