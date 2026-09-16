@@ -46,9 +46,8 @@ async fn calendar_query_evaluates_objects_and_respects_zero_depth() {
     let result = req(&s, "REPORT", "/cal/a.ics", &unmatched, &[("Depth", "0")]).await;
     assert_eq!(result.0, StatusCode::MULTI_STATUS);
     assert!(!result.1.contains("/cal/a.ics"));
-    // RFC 4791 7.9: a missing Depth header behaves as Depth: 1, so the query
-    // applies to the collection's immediate members. Depth: 0 targets the
-    // collection resource itself, which does not match a component query.
+    // RFC 4791 7.8 assumes omitted Depth is 0; we default to 1 as an
+    // interoperability choice, not the RFC default.
     for headers in [vec![], vec![("Depth", "1")]] {
         let result = req(&s, "REPORT", "/cal", query, &headers).await;
         assert_eq!(result.0, StatusCode::MULTI_STATUS);
