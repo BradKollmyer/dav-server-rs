@@ -42,6 +42,12 @@ Content-Range: bytes 1000-1003/*
 - If the start-byte is beyond the file's current length, the space in between
   will be filled with NULL bytes (`0x00`).
 
+This crate diverges from those two bullets for an **existing** file: a start
+past the current length returns `416 Range Not Satisfiable` instead of filling
+a NUL gap. Writing with start equal to the current length (contiguous append,
+as in the example above) is allowed, as is creating a new file whose first
+chunk starts past offset 0.
+
 ## Notes
 
 - `bytes<space>`, _not_ `bytes=`.

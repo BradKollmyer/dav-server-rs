@@ -55,6 +55,11 @@ The last request adds 4 bytes to the bottom of the file.
 - Neither the start, nor the end-byte have to be within the file's current size.
 - If the start-byte is beyond the file's current length, the space in between
   will be filled with NULL bytes (`0x00`).
+
+This crate diverges from those two bullets for an **existing** file: a start
+past the current length returns `416 Range Not Satisfiable` instead of filling
+a NUL gap. A start equal to the current length (contiguous append) is allowed,
+as is creating a new file whose first chunk starts past offset 0.
 - The specification currently does not support multiple ranges.
 - If both start and end offsets are given, than both must be non-negative, and
   the end offset must be greater or equal to the start offset.
@@ -80,6 +85,8 @@ X-Update-Range header | Result
 
 Please note that in the `bytes=12-` example, we used dots (`.`) to represent
 what are actually `NULL` bytes (so `0x00`). The null byte is not printable.
+This implementation rejects that request with 416, because the start is past
+the current end of the existing file.
 
 ## Status codes
 
