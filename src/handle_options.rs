@@ -42,7 +42,14 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         };
 
         let path = self.path(req);
-        let meta = self.fs.metadata(&path, &self.credentials).await;
+        // Probe the resource only if the path is actually visible. Treating a
+        // hidden symlink or sidecar marker as unmapped keeps an unauthenticated
+        // client from inferring their existence from the Allow header.
+        let meta = if self.ensure_visible(&path).await.is_ok() {
+            self.fs.metadata(&path, &self.credentials).await
+        } else {
+            Err(crate::fs::FsError::NotFound)
+        };
         let is_unmapped = meta.is_err();
         let is_file = meta.map(|m| m.is_file()).unwrap_or_default();
         let is_star = path.is_star() && method == DavMethod::Options;
