@@ -140,12 +140,32 @@ pub struct PropertyFilter {
     pub param_filters: Vec<ParameterFilter>,
 }
 
+/// CALDAV:time-range. The bounds are parsed once, when the request is parsed;
+/// a bound that is not an RFC 5545 DATE or UTC DATE-TIME leaves the range
+/// without usable bounds, so it never matches (and free-busy-query fails).
 #[derive(Debug, Clone)]
 pub struct TimeRange {
-    /// ISO 8601 format
+    /// `start` attribute as sent by the client.
     pub start: Option<String>,
-    /// ISO 8601 format
+    /// `end` attribute as sent by the client.
     pub end: Option<String>,
+    #[cfg(feature = "caldav")]
+    parsed: Option<ParsedTimeRange>,
+}
+
+impl TimeRange {
+    /// Build a time-range from the request's `start`/`end` attributes,
+    /// parsing the bounds once.
+    pub fn new(start: Option<String>, end: Option<String>) -> Self {
+        #[cfg(feature = "caldav")]
+        let parsed = parse_time_range_bounds(start.as_deref(), end.as_deref());
+        TimeRange {
+            start,
+            end,
+            #[cfg(feature = "caldav")]
+            parsed,
+        }
+    }
 }
 
 /// CalDAV REPORT request types
@@ -400,7 +420,7 @@ fn nested_other_filters_match<C: Component>(comp: &C, filters: &[ComponentFilter
 
 #[cfg(feature = "caldav")]
 fn component_overlaps_time_range<C: Component>(comp: &C, tr: &TimeRange) -> bool {
-    let Some(range) = parse_time_range_bounds(tr) else {
+    let Some(range) = tr.parsed else {
         return false;
     };
     let Some((comp_start, comp_end)) = component_span(comp) else {
@@ -410,6 +430,7 @@ fn component_overlaps_time_range<C: Component>(comp: &C, tr: &TimeRange) -> bool
 }
 
 #[cfg(feature = "caldav")]
+#[derive(Debug, Clone, Copy)]
 struct ParsedTimeRange {
     start: Option<DateTime<Utc>>,
     end: Option<DateTime<Utc>>,
@@ -417,12 +438,12 @@ struct ParsedTimeRange {
 
 /// Parse CALDAV:time-range start/end (RFC 5545 DATE or UTC DATE-TIME).
 #[cfg(feature = "caldav")]
-fn parse_time_range_bounds(tr: &TimeRange) -> Option<ParsedTimeRange> {
-    let start = match tr.start.as_deref() {
+fn parse_time_range_bounds(start: Option<&str>, end: Option<&str>) -> Option<ParsedTimeRange> {
+    let start = match start {
         Some(s) => Some(parse_caldav_date_time(s)?),
         None => None,
     };
-    let end = match tr.end.as_deref() {
+    let end = match end {
         Some(s) => Some(parse_caldav_date_time(s)?),
         None => None,
     };
@@ -872,7 +893,7 @@ fn property_instance_matches(prop: &Property, pf: &PropertyFilter) -> bool {
 /// DATE-TIME is a point; DATE is a one-day interval. Non-date values do not match.
 #[cfg(feature = "caldav")]
 fn property_overlaps_time_range(prop: &Property, tr: &TimeRange) -> bool {
-    let Some(range) = parse_time_range_bounds(tr) else {
+    let Some(range) = tr.parsed else {
         return false;
     };
     let Some(dpt) = DatePerhapsTime::from_property(prop) else {
@@ -955,10 +976,10 @@ mod tests {
             name: "DTSTART".into(),
             is_not_defined: false,
             text_match: None,
-            time_range: Some(TimeRange {
-                start: Some("20240601T000000Z".into()),
-                end: Some("20240701T000000Z".into()),
-            }),
+            time_range: Some(TimeRange::new(
+                Some("20240601T000000Z".into()),
+                Some("20240701T000000Z".into()),
+            )),
             param_filters: Vec::new(),
         });
         let query = vcalendar_with(filter);
@@ -980,15 +1001,57 @@ mod tests {
             name: "SUMMARY".into(),
             is_not_defined: false,
             text_match: None,
-            time_range: Some(TimeRange {
-                start: Some("20240601T000000Z".into()),
-                end: Some("20240701T000000Z".into()),
-            }),
+            time_range: Some(TimeRange::new(
+                Some("20240601T000000Z".into()),
+                Some("20240701T000000Z".into()),
+            )),
             param_filters: Vec::new(),
         });
         let query = vcalendar_with(filter);
         assert!(!calendar_matches_query(
             &vevent_ics("June Event", "20240615T120000Z", "20240615T130000Z"),
+            &query
+        ));
+    }
+
+    #[test]
+    fn comp_filter_time_range_parses_bounds_once() {
+        let mut filter = vevent_filter();
+        filter.time_range = Some(TimeRange::new(
+            Some("20240601T000000Z".into()),
+            Some("20240701T000000Z".into()),
+        ));
+        let tr = filter.time_range.as_ref().unwrap();
+        assert_eq!(
+            tr.parsed.unwrap().start,
+            parse_caldav_date_time("20240601T000000Z")
+        );
+        assert_eq!(
+            tr.parsed.unwrap().end,
+            parse_caldav_date_time("20240701T000000Z")
+        );
+        let query = vcalendar_with(filter);
+        assert!(calendar_matches_query(
+            &vevent_ics("Inside", "20240615T120000Z", "20240615T130000Z"),
+            &query
+        ));
+        assert!(!calendar_matches_query(
+            &vevent_ics("Outside", "20240101T120000Z", "20240101T130000Z"),
+            &query
+        ));
+    }
+
+    #[test]
+    fn comp_filter_time_range_with_invalid_bound_never_matches() {
+        let mut filter = vevent_filter();
+        filter.time_range = Some(TimeRange::new(
+            Some("not-a-date".into()),
+            Some("20240701T000000Z".into()),
+        ));
+        assert!(filter.time_range.as_ref().unwrap().parsed.is_none());
+        let query = vcalendar_with(filter);
+        assert!(!calendar_matches_query(
+            &vevent_ics("Inside", "20240615T120000Z", "20240615T130000Z"),
             &query
         ));
     }
@@ -1051,10 +1114,7 @@ mod tests {
 
     fn vevent_time_range_query(start: &str, end: &str) -> CalendarQuery {
         let mut filter = vevent_filter();
-        filter.time_range = Some(TimeRange {
-            start: Some(start.into()),
-            end: Some(end.into()),
-        });
+        filter.time_range = Some(TimeRange::new(Some(start.into()), Some(end.into())));
         vcalendar_with(filter)
     }
 
@@ -1197,24 +1257,20 @@ mod tests {
     #[test]
     fn freebusy_bounds_require_valid_start_and_end() {
         assert!(
-            parse_freebusy_bounds(&TimeRange {
-                start: Some("20240101T000000Z".into()),
-                end: Some("20240201T000000Z".into()),
-            })
+            parse_freebusy_bounds(&TimeRange::new(
+                Some("20240101T000000Z".into()),
+                Some("20240201T000000Z".into())
+            ))
             .is_some()
         );
         assert!(
-            parse_freebusy_bounds(&TimeRange {
-                start: None,
-                end: Some("20240201T000000Z".into()),
-            })
-            .is_none()
+            parse_freebusy_bounds(&TimeRange::new(None, Some("20240201T000000Z".into()))).is_none()
         );
         assert!(
-            parse_freebusy_bounds(&TimeRange {
-                start: Some("not-a-date".into()),
-                end: Some("20240201T000000Z".into()),
-            })
+            parse_freebusy_bounds(&TimeRange::new(
+                Some("not-a-date".into()),
+                Some("20240201T000000Z".into())
+            ))
             .is_none()
         );
     }
@@ -1223,33 +1279,33 @@ mod tests {
     fn freebusy_bounds_reject_inverted_and_non_utc_ranges() {
         // start must precede end
         assert!(
-            parse_freebusy_bounds(&TimeRange {
-                start: Some("20240201T000000Z".into()),
-                end: Some("20240101T000000Z".into()),
-            })
+            parse_freebusy_bounds(&TimeRange::new(
+                Some("20240201T000000Z".into()),
+                Some("20240101T000000Z".into())
+            ))
             .is_none()
         );
         assert!(
-            parse_freebusy_bounds(&TimeRange {
-                start: Some("20240101T000000Z".into()),
-                end: Some("20240101T000000Z".into()),
-            })
+            parse_freebusy_bounds(&TimeRange::new(
+                Some("20240101T000000Z".into()),
+                Some("20240101T000000Z".into())
+            ))
             .is_none()
         );
         // floating DATE-TIME
         assert!(
-            parse_freebusy_bounds(&TimeRange {
-                start: Some("20240101T000000".into()),
-                end: Some("20240201T000000Z".into()),
-            })
+            parse_freebusy_bounds(&TimeRange::new(
+                Some("20240101T000000".into()),
+                Some("20240201T000000Z".into())
+            ))
             .is_none()
         );
         // DATE only
         assert!(
-            parse_freebusy_bounds(&TimeRange {
-                start: Some("20240101T000000Z".into()),
-                end: Some("20240201".into()),
-            })
+            parse_freebusy_bounds(&TimeRange::new(
+                Some("20240101T000000Z".into()),
+                Some("20240201".into())
+            ))
             .is_none()
         );
     }
@@ -1296,10 +1352,7 @@ mod tests {
 
     fn time_range_query(start: &str, end: &str) -> CalendarQuery {
         let mut filter = vevent_filter();
-        filter.time_range = Some(TimeRange {
-            start: Some(start.into()),
-            end: Some(end.into()),
-        });
+        filter.time_range = Some(TimeRange::new(Some(start.into()), Some(end.into())));
         vcalendar_with(filter)
     }
 
@@ -1335,10 +1388,10 @@ mod tests {
         let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VTODO\nUID:1\nDTSTART:20240615T120000Z\nDURATION:PT2H\nEND:VTODO\nEND:VCALENDAR";
         let mut filter = vevent_filter();
         filter.name = "VTODO".into();
-        filter.time_range = Some(TimeRange {
-            start: Some("20240615T130000Z".into()),
-            end: Some("20240615T140000Z".into()),
-        });
+        filter.time_range = Some(TimeRange::new(
+            Some("20240615T130000Z".into()),
+            Some("20240615T140000Z".into()),
+        ));
         assert!(calendar_matches_query(ics, &vcalendar_with(filter)));
     }
 

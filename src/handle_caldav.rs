@@ -298,10 +298,10 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     }
 
     fn parse_time_range(&self, elem: &Element) -> DavResult<TimeRange> {
-        Ok(TimeRange {
-            start: elem.attributes.get("start").cloned(),
-            end: elem.attributes.get("end").cloned(),
-        })
+        Ok(TimeRange::new(
+            elem.attributes.get("start").cloned(),
+            elem.attributes.get("end").cloned(),
+        ))
     }
 
     fn parse_freebusy_query(&self, root: &Element) -> DavResult<TimeRange> {
