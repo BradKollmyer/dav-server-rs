@@ -140,31 +140,27 @@ pub struct PropertyFilter {
     pub param_filters: Vec<ParameterFilter>,
 }
 
-/// CALDAV:time-range. The bounds are parsed once, when the request is parsed;
-/// a bound that is not an RFC 5545 DATE or UTC DATE-TIME leaves the range
-/// without usable bounds, so it never matches (and free-busy-query fails).
+/// CALDAV:time-range as sent by the client. A bound that is not an RFC 5545
+/// DATE or UTC DATE-TIME leaves the range without usable bounds, so it never
+/// matches (and free-busy-query fails).
 #[derive(Debug, Clone)]
 pub struct TimeRange {
     /// `start` attribute as sent by the client.
     pub start: Option<String>,
     /// `end` attribute as sent by the client.
     pub end: Option<String>,
-    #[cfg(feature = "caldav")]
-    parsed: Option<ParsedTimeRange>,
 }
 
 impl TimeRange {
-    /// Build a time-range from the request's `start`/`end` attributes,
-    /// parsing the bounds once.
+    /// Build a time-range from the request's `start`/`end` attributes.
     pub fn new(start: Option<String>, end: Option<String>) -> Self {
-        #[cfg(feature = "caldav")]
-        let parsed = parse_time_range_bounds(start.as_deref(), end.as_deref());
-        TimeRange {
-            start,
-            end,
-            #[cfg(feature = "caldav")]
-            parsed,
-        }
+        TimeRange { start, end }
+    }
+
+    /// The parsed UTC bounds, or None when either attribute is unusable.
+    #[cfg(feature = "caldav")]
+    pub(crate) fn bounds(&self) -> Option<ParsedTimeRange> {
+        parse_time_range_bounds(self.start.as_deref(), self.end.as_deref())
     }
 }
 
@@ -420,7 +416,7 @@ fn nested_other_filters_match<C: Component>(comp: &C, filters: &[ComponentFilter
 
 #[cfg(feature = "caldav")]
 fn component_overlaps_time_range<C: Component>(comp: &C, tr: &TimeRange) -> bool {
-    let Some(range) = tr.parsed else {
+    let Some(range) = tr.bounds() else {
         return false;
     };
     let Some((comp_start, comp_end)) = component_span(comp) else {
@@ -431,7 +427,7 @@ fn component_overlaps_time_range<C: Component>(comp: &C, tr: &TimeRange) -> bool
 
 #[cfg(feature = "caldav")]
 #[derive(Debug, Clone, Copy)]
-struct ParsedTimeRange {
+pub(crate) struct ParsedTimeRange {
     start: Option<DateTime<Utc>>,
     end: Option<DateTime<Utc>>,
 }
@@ -893,7 +889,7 @@ fn property_instance_matches(prop: &Property, pf: &PropertyFilter) -> bool {
 /// DATE-TIME is a point; DATE is a one-day interval. Non-date values do not match.
 #[cfg(feature = "caldav")]
 fn property_overlaps_time_range(prop: &Property, tr: &TimeRange) -> bool {
-    let Some(range) = tr.parsed else {
+    let Some(range) = tr.bounds() else {
         return false;
     };
     let Some(dpt) = DatePerhapsTime::from_property(prop) else {
@@ -1023,11 +1019,11 @@ mod tests {
         ));
         let tr = filter.time_range.as_ref().unwrap();
         assert_eq!(
-            tr.parsed.unwrap().start,
+            tr.bounds().unwrap().start,
             parse_caldav_date_time("20240601T000000Z")
         );
         assert_eq!(
-            tr.parsed.unwrap().end,
+            tr.bounds().unwrap().end,
             parse_caldav_date_time("20240701T000000Z")
         );
         let query = vcalendar_with(filter);
@@ -1048,7 +1044,7 @@ mod tests {
             Some("not-a-date".into()),
             Some("20240701T000000Z".into()),
         ));
-        assert!(filter.time_range.as_ref().unwrap().parsed.is_none());
+        assert!(filter.time_range.as_ref().unwrap().bounds().is_none());
         let query = vcalendar_with(filter);
         assert!(!calendar_matches_query(
             &vevent_ics("Inside", "20240615T120000Z", "20240615T130000Z"),
