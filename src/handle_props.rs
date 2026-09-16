@@ -1072,12 +1072,14 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                             match kind {
                                 #[cfg(feature = "caldav")]
                                 CollectionKind::Calendar => {
-                                    let calendar = Element::new2("C:calendar");
+                                    let calendar =
+                                        Element::new2("C:calendar").ns("C", NS_CALDAV_URI);
                                     elem.children.push(XMLNode::Element(calendar));
                                 }
                                 #[cfg(feature = "carddav")]
                                 CollectionKind::Addressbook => {
-                                    let addressbook = Element::new2("CARD:addressbook");
+                                    let addressbook = Element::new2("CARD:addressbook")
+                                        .ns("CARD", NS_CARDDAV_URI);
                                     elem.children.push(XMLNode::Element(addressbook));
                                 }
                                 CollectionKind::None => {}
