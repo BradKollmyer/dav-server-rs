@@ -2230,6 +2230,120 @@ END:VCALENDAR"#
         let resp = server.handle(req).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
+
+    /// MemFs wrapper that counts `metadata` lookups per path.
+    #[derive(Clone)]
+    struct CountingCalFs {
+        inner: dav_server::memfs::MemFs,
+        metadata_calls: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+    }
+
+    impl CountingCalFs {
+        fn new() -> Self {
+            Self {
+                inner: *dav_server::memfs::MemFs::new(),
+                metadata_calls: Default::default(),
+            }
+        }
+
+        fn metadata_calls(&self, path: &str) -> usize {
+            self.metadata_calls
+                .lock()
+                .unwrap()
+                .get(path)
+                .copied()
+                .unwrap_or(0)
+        }
+    }
+
+    impl dav_server::fs::DavFileSystem for CountingCalFs {
+        fn open<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+            options: dav_server::fs::OpenOptions,
+        ) -> dav_server::fs::FsFuture<'a, Box<dyn dav_server::fs::DavFile>> {
+            self.inner.open(path, options)
+        }
+
+        fn read_dir<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+            meta: dav_server::fs::ReadDirMeta,
+        ) -> dav_server::fs::FsFuture<
+            'a,
+            dav_server::fs::FsStream<Box<dyn dav_server::fs::DavDirEntry>>,
+        > {
+            self.inner.read_dir(path, meta)
+        }
+
+        fn metadata<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+        ) -> dav_server::fs::FsFuture<'a, Box<dyn dav_server::fs::DavMetaData>> {
+            *self
+                .metadata_calls
+                .lock()
+                .unwrap()
+                .entry(path.as_url_string())
+                .or_default() += 1;
+            self.inner.metadata(path)
+        }
+
+        fn symlink_metadata<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+        ) -> dav_server::fs::FsFuture<'a, Box<dyn dav_server::fs::DavMetaData>> {
+            self.inner.symlink_metadata(path)
+        }
+
+        fn create_dir<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+        ) -> dav_server::fs::FsFuture<'a, ()> {
+            self.inner.create_dir(path)
+        }
+
+        fn remove_file<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+        ) -> dav_server::fs::FsFuture<'a, ()> {
+            self.inner.remove_file(path)
+        }
+
+        fn mark_calendar<'a>(
+            &'a self,
+            path: &'a dav_server::davpath::DavPath,
+        ) -> dav_server::fs::FsFuture<'a, ()> {
+            self.inner.mark_calendar(path)
+        }
+    }
+
+    /// PUT resolves the parent collection type (and its size limit) once.
+    #[tokio::test]
+    async fn test_calendar_put_probes_parent_once() {
+        let fs = CountingCalFs::new();
+        let server = DavHandler::builder()
+            .filesystem(Box::new(fs.clone()))
+            .locksystem(FakeLs::new())
+            .build_handler();
+        mkcol(&server, "/calendars").await;
+        let req = Request::builder()
+            .method("MKCALENDAR")
+            .uri("/calendars/my-calendar")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(server.handle(req).await.status(), StatusCode::CREATED);
+
+        let before = fs.metadata_calls("/calendars/my-calendar/");
+        let ics = create_ics_data("once", "Probe Once");
+        let resp = put_ics_data(&server, ics, "/calendars/my-calendar/once.ics").await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            fs.metadata_calls("/calendars/my-calendar/") - before,
+            1,
+            "PUT should look up the parent collection exactly once"
+        );
+    }
 }
 
 #[cfg(all(not(feature = "caldav"), feature = "memfs"))]

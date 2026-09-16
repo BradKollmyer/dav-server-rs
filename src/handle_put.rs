@@ -31,6 +31,19 @@ enum TypedCollection {
     Addressbook,
 }
 
+#[cfg(any(feature = "caldav", feature = "carddav"))]
+impl TypedCollection {
+    /// Limit for calendar/addressbook object PUT/PATCH in this collection.
+    fn max_resource_size(self) -> u64 {
+        match self {
+            #[cfg(feature = "caldav")]
+            TypedCollection::Calendar => crate::caldav::DEFAULT_MAX_RESOURCE_SIZE,
+            #[cfg(feature = "carddav")]
+            TypedCollection::Addressbook => crate::carddav::DEFAULT_MAX_RESOURCE_SIZE,
+        }
+    }
+}
+
 /// Size of the resource after a PUT (replace) or PATCH/partial PUT.
 #[cfg(any(feature = "caldav", feature = "carddav"))]
 fn resulting_resource_size(
@@ -249,9 +262,9 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         }
 
         #[cfg(any(feature = "caldav", feature = "carddav"))]
-        let size_limit = self.max_resource_size_limit(&path).await;
-        #[cfg(any(feature = "caldav", feature = "carddav"))]
         let typed_collection = self.typed_parent_collection(&path).await;
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        let size_limit = typed_collection.map(TypedCollection::max_resource_size);
         #[cfg(any(feature = "caldav", feature = "carddav"))]
         let existing_len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
         #[cfg(any(feature = "caldav", feature = "carddav"))]
@@ -499,24 +512,6 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             return;
         }
         let _ = self.fs.remove_file(path, &self.credentials).await;
-    }
-
-    /// Limit for calendar/addressbook object PUT/PATCH, if the parent is such a collection.
-    #[cfg(any(feature = "caldav", feature = "carddav"))]
-    async fn max_resource_size_limit(&self, path: &DavPath) -> Option<u64> {
-        let parent = path.parent();
-        if let Ok(meta) = self.fs.metadata(&parent, &self.credentials).await {
-            #[cfg(feature = "caldav")]
-            if self.collection_is_calendar(&parent, meta.as_ref()).await {
-                return Some(crate::caldav::DEFAULT_MAX_RESOURCE_SIZE);
-            }
-            #[cfg(feature = "carddav")]
-            if self.collection_is_addressbook(&parent, meta.as_ref()).await {
-                return Some(crate::carddav::DEFAULT_MAX_RESOURCE_SIZE);
-            }
-        }
-
-        None
     }
 
     /// Parse ownCloud/Nextcloud `X-OC-MTime` / `X-OC-CTime` headers.
