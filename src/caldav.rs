@@ -5,10 +5,11 @@
 //! using the iCalendar format.
 
 #[cfg(feature = "caldav")]
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, TimeZone, Utc};
 #[cfg(feature = "caldav")]
 use icalendar::{
-    Calendar, CalendarComponent, CalendarDateTime, Component, DatePerhapsTime, Property,
+    Calendar, CalendarComponent, CalendarDateTime, Component, DatePerhapsTime, EventLike, Property,
+    rrule,
 };
 use xmltree::Element;
 
@@ -654,8 +655,14 @@ pub(crate) struct BusyInterval {
     pub(crate) fbtype: FreeBusyType,
 }
 
-/// Busy intervals from overlapping opaque VEVENT and VFREEBUSY FREEBUSY periods.
-/// Recurring VEVENT: only the base instance is included; RRULE is not expanded.
+/// Cap on the occurrences expanded from one recurring VEVENT per busy-query
+/// range, so an unbounded RRULE cannot consume unbounded work.
+#[cfg(feature = "caldav")]
+const MAX_OCCURRENCE_EXPANSION: u16 = 2500;
+
+/// Busy intervals from overlapping opaque VEVENT and VFREEBUSY FREEBUSY
+/// periods. A recurring VEVENT contributes one interval per expanded
+/// RRULE/RDATE occurrence (minus EXDATEs) that overlaps the range.
 #[cfg(feature = "caldav")]
 pub(crate) fn calendar_busy_intervals(
     calendar: &Calendar,
@@ -669,8 +676,8 @@ pub(crate) fn calendar_busy_intervals(
                 let Some(fbtype) = event_busy_type(event) else {
                     continue;
                 };
-                if let Some((start, end)) = component_span(event)
-                    && time_spans_overlap(start, end, Some(range_start), Some(range_end))
+                for (start, end) in
+                    event_occurrences_in_range(event, calendar, range_start, range_end)
                 {
                     busy.push(BusyInterval { start, end, fbtype });
                 }
@@ -684,6 +691,65 @@ pub(crate) fn calendar_busy_intervals(
         }
     }
     busy
+}
+
+/// `[start, end)` interval of each occurrence of an event within the queried
+/// range, expanding RRULE/RDATE (minus EXDATE) relative to DTSTART. Events
+/// without recurrence properties, and events whose RRULE fails to parse,
+/// fall back to their DTSTART/DTEND base instance. Expansion is bounded by
+/// the range and by `MAX_OCCURRENCE_EXPANSION`.
+#[cfg(feature = "caldav")]
+fn event_occurrences_in_range(
+    event: &icalendar::Event,
+    calendar: &Calendar,
+    range_start: DateTime<Utc>,
+    range_end: DateTime<Utc>,
+) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+    let base_span = || {
+        component_span(event)
+            .filter(|(start, end)| {
+                time_spans_overlap(*start, *end, Some(range_start), Some(range_end))
+            })
+            .into_iter()
+            .collect()
+    };
+    let has_recurrence = property_value(event, "RRULE").is_some()
+        || event
+            .multi_properties()
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("RDATE") || k.eq_ignore_ascii_case("EXDATE"));
+    let Some((span_start, span_end)) = component_span(event) else {
+        return Vec::new();
+    };
+    if !has_recurrence {
+        return base_span();
+    }
+    let duration = span_end - span_start;
+    let Ok(set) = event.get_recurrence() else {
+        return base_span();
+    };
+    let Ok(tz) = calendar
+        .get_timezone()
+        .unwrap_or("UTC")
+        .parse::<chrono_tz::Tz>()
+    else {
+        return base_span();
+    };
+    let tz = rrule::Tz::from(tz);
+    let window_start = range_start - duration;
+    let after_zoned = tz.from_utc_datetime(&window_start.naive_utc());
+    let before_zoned = tz.from_utc_datetime(&range_end.naive_utc());
+    set.after(after_zoned)
+        .before(before_zoned)
+        .all(MAX_OCCURRENCE_EXPANSION)
+        .dates
+        .into_iter()
+        .map(|occ| {
+            let start = occ.with_timezone(&Utc);
+            (start, start + duration)
+        })
+        .filter(|(start, end)| time_spans_overlap(*start, *end, Some(range_start), Some(range_end)))
+        .collect()
 }
 
 /// RFC 4791 7.10: TRANSPARENT and CANCELLED events contribute no busy time;
@@ -1312,6 +1378,56 @@ mod tests {
             end: parse_caldav_date_time(end).unwrap(),
             fbtype,
         }
+    }
+
+    #[test]
+    fn recurring_vevent_contributes_each_occurrence() {
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:1\nDTSTART:20240101T120000Z\nDTEND:20240101T130000Z\nRRULE:FREQ=DAILY;COUNT=3\nEND:VEVENT\nEND:VCALENDAR";
+        let cal = parse_ics(ics);
+        assert_eq!(
+            calendar_busy_intervals(
+                &cal,
+                parse_caldav_date_time("20240101T000000Z").unwrap(),
+                parse_caldav_date_time("20240201T000000Z").unwrap(),
+            ),
+            (1..=3)
+                .map(|d| busy(
+                    &format!("2024010{d}T120000Z"),
+                    &format!("2024010{d}T130000Z"),
+                    FreeBusyType::Busy
+                ))
+                .collect::<Vec<_>>()
+        );
+        // A range covering only the second occurrence sees one interval.
+        assert_eq!(
+            calendar_busy_intervals(
+                &cal,
+                parse_caldav_date_time("20240102T000000Z").unwrap(),
+                parse_caldav_date_time("20240103T000000Z").unwrap(),
+            ),
+            vec![busy(
+                "20240102T120000Z",
+                "20240102T130000Z",
+                FreeBusyType::Busy
+            )]
+        );
+    }
+
+    #[test]
+    fn exdate_drops_an_occurrence_from_busy_intervals() {
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:1\nDTSTART:20240101T120000Z\nDTEND:20240101T130000Z\nRRULE:FREQ=DAILY;COUNT=3\nEXDATE:20240102T120000Z\nEND:VEVENT\nEND:VCALENDAR";
+        let cal = parse_ics(ics);
+        assert_eq!(
+            calendar_busy_intervals(
+                &cal,
+                parse_caldav_date_time("20240101T000000Z").unwrap(),
+                parse_caldav_date_time("20240201T000000Z").unwrap(),
+            ),
+            vec![
+                busy("20240101T120000Z", "20240101T130000Z", FreeBusyType::Busy),
+                busy("20240103T120000Z", "20240103T130000Z", FreeBusyType::Busy),
+            ]
+        );
     }
 
     #[test]

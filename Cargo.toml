@@ -21,7 +21,7 @@ features = ["full"]
 default = ["localfs", "memfs", "proppatch"]
 actix-compat = [ "actix-web" ]
 warp-compat = [ "warp", "hyper" ]
-caldav = [ "icalendar" ]
+caldav = [ "icalendar", "chrono-tz" ]
 carddav = [ "calcard" ]
 # Compat adapters plus CalDAV/CardDAV
 all = [ "actix-compat", "warp-compat", "caldav", "carddav" ]
@@ -66,6 +66,7 @@ percent-encoding = "2.3.2"
 pin-project-lite = "0.2.17"
 tokio = { version = "1.50.0", features = [ "rt" ] }
 chrono = { version = "0.4.44", default-features = false, features = [ "clock" ] }
+chrono-tz = { version = "0.10", optional = true }
 url = "2.5.8"
 uuid = { version = "1.22.0", features = ["v4"] }
 xml-rs = "1.0.0"
@@ -75,7 +76,7 @@ hyper = { version = "1.1.0", default-features = false, features = ["server"], op
 warp = { version = "0.3.0", optional = true, default-features = false }
 actix-web = { version = "4.13.0", default-features = false, optional = true }
 reflink-copy = { version = "0.1.29", optional = true }
-icalendar = { version = "0.17.6", features = [ "chrono-tz" ], optional = true }
+icalendar = { version = "0.17.6", features = [ "chrono-tz", "recurrence" ], optional = true }
 calcard = { version = "0.3.2", default-features = false, optional = true }
 derive-where = "1.6.0"
 
