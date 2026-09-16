@@ -68,7 +68,10 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         } else {
             let parent = path.parent();
             match self.fs.metadata(&parent, &self.credentials).await {
-                Ok(pmeta) => self.collection_is_addressbook(&parent, pmeta.as_ref()).await,
+                Ok(pmeta) => {
+                    self.collection_is_addressbook(&parent, pmeta.as_ref())
+                        .await
+                }
                 Err(_) => false,
             }
         };

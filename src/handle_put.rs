@@ -244,7 +244,11 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         // A range write to an existing file must not start past the current
         // end of the file: that would leave a sparse hole of undefined bytes.
         // A start exactly at the current end (a contiguous append) is allowed.
-        if do_range && !oo.append && let Ok(ref m) = meta && start > m.len() {
+        if do_range
+            && !oo.append
+            && let Ok(ref m) = meta
+            && start > m.len()
+        {
             return Err(DavError::StatusClose(SC::RANGE_NOT_SATISFIABLE));
         }
 
