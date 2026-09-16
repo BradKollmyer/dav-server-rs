@@ -178,3 +178,22 @@ async fn range_write_on_missing_file_may_start_past_zero() {
         assert_eq!(body, expected);
     }
 }
+
+#[tokio::test]
+async fn patch_last_range_on_missing_file_is_rejected() {
+    let server = DavHandler::builder()
+        .filesystem(MemFs::new())
+        .build_handler();
+    let response = range_write(
+        &server,
+        "PATCH",
+        "/missing",
+        "X-Update-Range",
+        "bytes=-4",
+        "XXXX",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    let (status, _) = get_body(&server, "/missing").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
