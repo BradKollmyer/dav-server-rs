@@ -66,3 +66,27 @@ async fn aliases_cannot_destroy_copy_or_move_source() {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[tokio::test]
+async fn recursive_copy_omits_hidden_entries_without_following_them() {
+    let (s, root) = local(false);
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::create_dir(root.join("secret-dir")).unwrap();
+    std::fs::write(root.join("secret-dir/key"), "secret").unwrap();
+    std::fs::write(root.join(".secret"), "secret").unwrap();
+    std::fs::write(root.join("src/.hidden"), "hidden").unwrap();
+    std::fs::write(root.join("src/public"), "public").unwrap();
+    std::os::unix::fs::symlink("../.secret", root.join("src/leak")).unwrap();
+    std::os::unix::fs::symlink("../secret-dir", root.join("src/leak-dir")).unwrap();
+    assert_eq!(
+        req(&s, "COPY", "/src", "", &[("Destination", "/copy")])
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+    assert!(!root.join("copy/leak").exists());
+    assert!(!root.join("copy/leak-dir").exists());
+    assert!(!root.join("copy/.hidden").exists());
+    assert_eq!(std::fs::read(root.join("copy/public")).unwrap(), b"public");
+    std::fs::remove_dir_all(root).unwrap();
+}

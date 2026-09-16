@@ -109,6 +109,14 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     nsrc.add_slash();
                     ndest.add_slash();
                 }
+                // Apply the same visibility policy before following a recursive
+                // entry. Otherwise a hidden symlink can become a readable file.
+                if let Err(e) = self.ensure_visible(&nsrc).await {
+                    if e.statuscode() != StatusCode::NOT_FOUND {
+                        retval = add_status(multierror, &nsrc, e).await;
+                    }
+                    continue;
+                }
                 // recurse.
                 if let Err(e) = self
                     .do_copy(&nsrc, topdest, &ndest, depth, multierror)
