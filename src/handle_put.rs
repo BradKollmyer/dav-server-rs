@@ -268,12 +268,6 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         #[cfg(any(feature = "caldav", feature = "carddav"))]
         let existing_len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
         #[cfg(any(feature = "caldav", feature = "carddav"))]
-        let restore_bytes = if do_range && typed_collection.is_some() && meta.is_ok() {
-            self.read_resource_bytes(&path, existing_len).await.ok()
-        } else {
-            None
-        };
-        #[cfg(any(feature = "caldav", feature = "carddav"))]
         if let Some(max) = size_limit
             && have_count
         {
@@ -283,6 +277,46 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                 return Err(DavError::StatusClose(SC::FORBIDDEN));
             }
         }
+
+        let mut body = pin!(body);
+        // Calendar/contact replacements are bounded. Read and validate them
+        // before opening with truncate, so rejected uploads leave the old
+        // bytes and validators intact.
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        let staged_body = if !do_range && let Some(kind) = typed_collection {
+            let mut bytes = Vec::new();
+            while let Some(frame) = body.frame().await {
+                let frame = frame.map_err(to_ioerror)?;
+                let Ok(mut data) = frame.into_data() else {
+                    continue;
+                };
+                let total = bytes.len() as u64 + data.remaining() as u64;
+                if total > kind.max_resource_size() {
+                    return Err(DavError::StatusClose(SC::FORBIDDEN));
+                }
+                if have_count && total > count {
+                    return Err(DavError::StatusClose(SC::BAD_REQUEST));
+                }
+                bytes.extend_from_slice(&data.copy_to_bytes(data.remaining()));
+            }
+            if have_count && bytes.len() as u64 != count {
+                return Err(DavError::StatusClose(SC::BAD_REQUEST));
+            }
+            if !Self::typed_body_valid(kind, &bytes) {
+                return Err(DavError::StatusClose(SC::FORBIDDEN));
+            }
+            Some(Bytes::from(bytes))
+        } else {
+            None
+        };
+        // Do not start a destructive write if the existing object cannot be
+        // saved. Full writes also need rollback when the backend write fails.
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        let restore_bytes = if typed_collection.is_some() && meta.is_ok() {
+            Some(self.read_resource_bytes(&path, existing_len).await?)
+        } else {
+            None
+        };
 
         // tweak open options.
         if req
@@ -327,13 +361,15 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         res.headers_mut()
             .typed_insert(headers::AcceptRanges::bytes());
 
-        let mut body = pin!(body);
-
-        #[cfg(any(feature = "caldav", feature = "carddav"))]
-        let mut typed_body = (!do_range && typed_collection.is_some()).then(Vec::new);
-
         // loop, read body, write to file.
         let written: DavResult<()> = async {
+            #[cfg(any(feature = "caldav", feature = "carddav"))]
+            if let Some(bytes) = staged_body {
+                file.write_bytes(bytes).await?;
+                file.flush().await?;
+                drop(file);
+                return Ok(());
+            }
             let mut total = 0u64;
             while let Some(data) = body.frame().await {
                 let data_frame = data.map_err(|e| to_ioerror(e))?;
@@ -362,19 +398,8 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                 };
                 if let Some(bytes) = b {
                     let bytes = std::mem::replace(bytes, Bytes::new());
-                    #[cfg(any(feature = "caldav", feature = "carddav"))]
-                    if let Some(ref mut collected) = typed_body {
-                        collected.extend_from_slice(&bytes);
-                    }
                     file.write_bytes(bytes).await?;
                 } else {
-                    #[cfg(any(feature = "caldav", feature = "carddav"))]
-                    if let Some(ref mut collected) = typed_body {
-                        let bytes = buf.copy_to_bytes(buf.remaining());
-                        collected.extend_from_slice(&bytes);
-                        file.write_bytes(bytes).await?;
-                        continue;
-                    }
                     file.write_buf(Box::new(buf)).await?;
                 }
             }
@@ -400,11 +425,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         #[cfg(any(feature = "caldav", feature = "carddav"))]
         if let Err(e) = written {
             if typed_collection.is_some() {
-                if do_range {
-                    self.restore_or_remove_typed(&path, restore_bytes).await;
-                } else if meta.is_err() {
-                    let _ = self.fs.remove_file(&path, &self.credentials).await;
-                }
+                self.restore_or_remove_typed(&path, restore_bytes).await;
             }
             return Err(e);
         }
@@ -412,16 +433,12 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         written?;
 
         // RFC 4791 5.3.2.1 / RFC 6352 6.3.2: invalid calendar/address data is 403.
-        // Full PUT is checked from the collected body; PATCH / partial PUT is
+        // Full PUT was validated before opening; PATCH / partial PUT is
         // checked from the resulting resource and restored on failure.
         #[cfg(any(feature = "caldav", feature = "carddav"))]
-        if let Some(kind) = typed_collection {
-            let body = if do_range {
-                let cap = size_limit.unwrap_or(u64::MAX);
-                self.read_resource_bytes(&path, cap).await.ok()
-            } else {
-                typed_body.take()
-            };
+        if do_range && let Some(kind) = typed_collection {
+            let cap = size_limit.unwrap_or(u64::MAX);
+            let body = self.read_resource_bytes(&path, cap).await.ok();
             if !body.is_some_and(|body| Self::typed_body_valid(kind, &body)) {
                 self.restore_or_remove_typed(&path, restore_bytes).await;
                 return Err(DavError::StatusClose(SC::FORBIDDEN));
@@ -532,12 +549,13 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
     #[cfg(any(feature = "caldav", feature = "carddav"))]
     async fn restore_or_remove_typed(&self, path: &DavPath, restore: Option<Vec<u8>>) {
-        if let Some(prev) = restore
-            && self.restore_resource_bytes(path, prev).await.is_ok()
-        {
-            return;
+        if let Some(prev) = restore {
+            if let Err(e) = self.restore_resource_bytes(path, prev).await {
+                error!("failed to restore typed resource {path}: {e:?}");
+            }
+        } else {
+            let _ = self.fs.remove_file(path, &self.credentials).await;
         }
-        let _ = self.fs.remove_file(path, &self.credentials).await;
     }
 
     /// Parse ownCloud/Nextcloud `X-OC-MTime` / `X-OC-CTime` headers.
