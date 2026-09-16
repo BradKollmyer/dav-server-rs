@@ -42,9 +42,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         };
 
         let path = self.path(req);
-        // Probe the resource only if the path is actually visible. Treating a
-        // hidden symlink or sidecar marker as unmapped keeps an unauthenticated
-        // client from inferring their existence from the Allow header.
+        // Hidden paths must look unmapped so Allow does not advertise GET/PROPFIND.
         let meta = if self.ensure_visible(&path).await.is_ok() {
             self.fs.metadata(&path, &self.credentials).await
         } else {
