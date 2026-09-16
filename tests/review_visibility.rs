@@ -53,6 +53,33 @@ async fn request(
     status
 }
 
+async fn options_allow(server: &DavHandler, path: &str) -> String {
+    let response = server
+        .handle(
+            Request::builder()
+                .method("OPTIONS")
+                .uri(path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK, "{path}");
+    response
+        .headers()
+        .get("allow")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn assert_unmapped_allow(allow: &str) {
+    let has = |method| allow.split(',').any(|m| m == method);
+    assert!(has("PUT"), "{allow}");
+    assert!(has("MKCOL"), "{allow}");
+    assert!(!has("GET"), "{allow}");
+    assert!(!has("PROPFIND"), "{allow}");
+}
+
 #[tokio::test]
 async fn hidden_ancestors_block_reads_and_mutations_under_mount_prefix() {
     let fixture = Fixture::new();
@@ -106,4 +133,33 @@ async fn visible_policy_still_allows_hidden_names_and_in_share_symlinks() {
     for path in ["/mount/.secret/key", "/mount/link/key"] {
         assert_eq!(request(&server, "GET", path, None).await, StatusCode::OK);
     }
+}
+
+#[tokio::test]
+async fn options_on_hidden_path_omits_get_and_propfind() {
+    let fixture = Fixture::new();
+    let server = fixture.server(true);
+    let missing = options_allow(&server, "/mount/missing").await;
+    assert_unmapped_allow(&missing);
+    assert_eq!(options_allow(&server, "/mount/link").await, missing);
+    let visible = options_allow(&server, "/mount/real/key").await;
+    assert!(visible.split(',').any(|m| m == "GET"), "{visible}");
+    assert!(visible.split(',').any(|m| m == "PROPFIND"), "{visible}");
+}
+
+#[cfg(feature = "caldav")]
+#[tokio::test]
+async fn options_on_collection_marker_omits_get_and_propfind() {
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.0.join("cal")).unwrap();
+    std::fs::write(fixture.0.join("cal/.dav-calendar"), b"").unwrap();
+    // hide_dot_prefix Never so a leak would come from the marker, not the dot.
+    let server = DavHandler::builder()
+        .filesystem(LocalFs::new(&fixture.0, false, true, false))
+        .hide_dot_prefix(DavOptionHide::Never)
+        .autoindex(true)
+        .build_handler();
+    let missing = options_allow(&server, "/missing").await;
+    assert_unmapped_allow(&missing);
+    assert_eq!(options_allow(&server, "/cal/.dav-calendar").await, missing);
 }
