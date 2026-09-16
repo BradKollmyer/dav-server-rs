@@ -1551,19 +1551,16 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
         self.emitter.write(XmlWEvent::start_element("D:propstat"))?;
         self.emitter.write(XmlWEvent::start_element("D:prop"))?;
 
-        // When no <prop> was given the server returns all the report's
-        // properties; otherwise only the requested ones (RFC 6352 10.6).
+        // RFC 6352 8.6 / 10.3: absent <prop> means all report properties.
         let want =
             |name: &str| requested_props.is_empty() || requested_props.iter().any(|p| p == name);
 
-        // Write address-data element with content, if requested.
         if want("address-data") {
             let mut elem = Element::new2("CARD:address-data").ns("CARD", NS_CARDDAV_URI);
             elem.children.push(XMLNode::Text(vcard_data.to_string()));
             elem.write_ev(&mut self.emitter)?;
         }
 
-        // Write getetag element, if requested.
         if want("getetag") {
             Element::new2("D:getetag")
                 .text(etag)
