@@ -152,12 +152,23 @@ fn collection_type_marker(prefix: &str, namespace: &str, name: &str) -> DavProp 
     }
 }
 
-/// Turn a `patch_props` result for a collection type marker into an error
-/// when the filesystem refused to store it.
+/// Shared body of the default `mark_calendar` / `mark_addressbook`
+/// implementations: when the filesystem has dead properties, store `marker`
+/// through `patch_props` and fail if it refuses the marker.
 #[cfg(all(feature = "proppatch", any(feature = "caldav", feature = "carddav")))]
-fn check_marker_patch(res: Vec<(StatusCode, DavProp)>) -> FsResult<()> {
-    if res.iter().any(|(status, _)| !status.is_success()) {
-        return Err(FsError::Forbidden);
+async fn mark_with_prop<'a, P>(
+    have_props: impl Future<Output = bool>,
+    patch_props: P,
+    marker: DavProp,
+) -> FsResult<()>
+where
+    P: FnOnce(Vec<(bool, DavProp)>) -> FsFuture<'a, Vec<(StatusCode, DavProp)>>,
+{
+    if have_props.await {
+        let res = patch_props(vec![(true, marker)]).await?;
+        if res.iter().any(|(status, _)| !status.is_success()) {
+            return Err(FsError::Forbidden);
+        }
     }
     Ok(())
 }
@@ -199,13 +210,7 @@ pub(crate) async fn meta_or_prop_is_calendar<C>(
 where
     C: Clone + Send + Sync + 'static,
 {
-    if meta.is_calendar(path) {
-        return true;
-    }
-    match fs.get_props(path, false, credentials).await {
-        Ok(props) => props.iter().any(is_calendar_type_marker),
-        Err(_) => false,
-    }
+    meta.is_calendar(path) || has_type_marker(fs, path, credentials, is_calendar_type_marker).await
 }
 
 /// True if metadata or a stored CardDAV marker property says this is an address book.
@@ -219,11 +224,23 @@ pub(crate) async fn meta_or_prop_is_addressbook<C>(
 where
     C: Clone + Send + Sync + 'static,
 {
-    if meta.is_addressbook(path) {
-        return true;
-    }
+    meta.is_addressbook(path)
+        || has_type_marker(fs, path, credentials, is_addressbook_type_marker).await
+}
+
+/// True if a stored dead property of `path` satisfies `is_marker`.
+#[cfg(any(feature = "caldav", feature = "carddav"))]
+async fn has_type_marker<C>(
+    fs: &dyn GuardedFileSystem<C>,
+    path: &DavPath,
+    credentials: &C,
+    is_marker: fn(&DavProp) -> bool,
+) -> bool
+where
+    C: Clone + Send + Sync + 'static,
+{
     match fs.get_props(path, false, credentials).await {
-        Ok(props) => props.iter().any(is_addressbook_type_marker),
+        Ok(props) => props.iter().any(is_marker),
         Err(_) => false,
     }
 }
@@ -423,12 +440,12 @@ pub trait DavFileSystem {
     {
         Box::pin(async move {
             #[cfg(feature = "proppatch")]
-            if self.have_props(path).await {
-                let res = self
-                    .patch_props(path, vec![(true, calendar_type_marker())])
-                    .await?;
-                check_marker_patch(res)?;
-            }
+            mark_with_prop(
+                self.have_props(path),
+                |patch| self.patch_props(path, patch),
+                calendar_type_marker(),
+            )
+            .await?;
             Ok(())
         })
     }
@@ -446,12 +463,12 @@ pub trait DavFileSystem {
     {
         Box::pin(async move {
             #[cfg(feature = "proppatch")]
-            if self.have_props(path).await {
-                let res = self
-                    .patch_props(path, vec![(true, addressbook_type_marker())])
-                    .await?;
-                check_marker_patch(res)?;
-            }
+            mark_with_prop(
+                self.have_props(path),
+                |patch| self.patch_props(path, patch),
+                addressbook_type_marker(),
+            )
+            .await?;
             Ok(())
         })
     }
@@ -706,12 +723,12 @@ where
     fn mark_calendar<'a>(&'a self, path: &'a DavPath, credentials: &'a C) -> FsFuture<'a, ()> {
         Box::pin(async move {
             #[cfg(feature = "proppatch")]
-            if self.have_props(path, credentials).await {
-                let res = self
-                    .patch_props(path, vec![(true, calendar_type_marker())], credentials)
-                    .await?;
-                check_marker_patch(res)?;
-            }
+            mark_with_prop(
+                self.have_props(path, credentials),
+                |patch| self.patch_props(path, patch, credentials),
+                calendar_type_marker(),
+            )
+            .await?;
             Ok(())
         })
     }
@@ -726,12 +743,12 @@ where
     fn mark_addressbook<'a>(&'a self, path: &'a DavPath, credentials: &'a C) -> FsFuture<'a, ()> {
         Box::pin(async move {
             #[cfg(feature = "proppatch")]
-            if self.have_props(path, credentials).await {
-                let res = self
-                    .patch_props(path, vec![(true, addressbook_type_marker())], credentials)
-                    .await?;
-                check_marker_patch(res)?;
-            }
+            mark_with_prop(
+                self.have_props(path, credentials),
+                |patch| self.patch_props(path, patch, credentials),
+                addressbook_type_marker(),
+            )
+            .await?;
             Ok(())
         })
     }
