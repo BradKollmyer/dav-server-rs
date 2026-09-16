@@ -59,8 +59,6 @@ impl<K: Eq + Hash + Debug + Clone, D: Debug> Tree<K, D> {
 
     /// add a child node to an existing node.
     pub fn add_child(&mut self, parent: u64, key: K, data: D, overwrite: bool) -> FsResult<u64> {
-        // Determine up front whether this is an overwrite of an existing child
-        // so we can remove the old node instead of orphaning it in the map.
         let existing = {
             let pnode = self.nodes.get(&parent).ok_or(FsError::NotFound)?;
             match pnode.children.get(&key) {
@@ -74,7 +72,6 @@ impl<K: Eq + Hash + Debug + Clone, D: Debug> Tree<K, D> {
             }
         };
         if let Some(old) = existing {
-            // Overwriting replaces the whole subtree rooted at the old child.
             self.delete_subtree(old).ok();
         }
         let id = self.new_node(parent, data);
