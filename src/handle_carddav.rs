@@ -296,9 +296,13 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             }
         }
 
-        // Generate multistatus response
-        self.generate_addressbook_multiget_response(results, Vec::new())
-            .await
+        // Generate multistatus response, honoring the requested prop set.
+        self.generate_addressbook_multiget_response(
+            results,
+            Vec::new(),
+            query.query.properties.clone(),
+        )
+        .await
     }
 
     async fn handle_addressbook_multiget(
@@ -330,7 +334,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             missing_hrefs.push(href.clone());
         }
 
-        self.generate_addressbook_multiget_response(results, missing_hrefs)
+        self.generate_addressbook_multiget_response(results, missing_hrefs, Vec::new())
             .await
     }
 
@@ -339,6 +343,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         &self,
         results: Vec<(DavPath, String, String)>,
         missing_hrefs: Vec<String>,
+        requested_props: Vec<String>,
     ) -> DavResult<Response<Body>> {
         let mut resp = Response::new(Body::empty());
 
@@ -367,7 +372,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             pw.set_tx(tx);
 
             for (href, etag, vcard_data) in results {
-                pw.write_vcard_data_response(&href, &etag, &vcard_data)?;
+                pw.write_vcard_data_response(&href, &etag, &vcard_data, &requested_props)?;
             }
 
             for missing_href in missing_hrefs {
