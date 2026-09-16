@@ -1,4 +1,5 @@
 use futures_util::StreamExt;
+use headers::HeaderMapExt;
 use http::{Request, Response, StatusCode};
 use std::io::Cursor;
 use xmltree::{Element, XMLNode};
@@ -11,6 +12,7 @@ use crate::{DavInner, DavResult};
 use crate::async_stream::AsyncStream;
 use crate::carddav::*;
 use crate::dav_filters::hrefs_from;
+use crate::davheaders;
 use crate::davpath::DavPath;
 use crate::handle_props::PropWriter;
 
@@ -57,14 +59,11 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         // RFC 6352 8.6-8.7: these reports are scoped to address book
         // collections, and supported-report-set only advertises them there.
-        // addressbook-query must be addressed to an address book collection;
-        // addressbook-multiget may also be addressed to an address object
-        // resource inside an address book.
+        // addressbook-query and addressbook-multiget may also be addressed
+        // to an address object resource inside an address book.
         let meta = self.fs.metadata(&path, &self.credentials).await?;
         let target_is_addressbook = if meta.is_dir() {
             self.collection_is_addressbook(&path, meta.as_ref()).await
-        } else if matches!(report_type, ParsedCardDavReportType::AddressBookQuery(_)) {
-            false
         } else {
             let parent = path.parent();
             match self.fs.metadata(&parent, &self.credentials).await {
@@ -81,7 +80,17 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         match report_type {
             ParsedCardDavReportType::AddressBookQuery(query) => {
-                self.handle_addressbook_query(&path, query).await
+                // RFC 6352 8.6: when no Depth header is present the query
+                // applies to the address book collection's immediate members, as
+                // if Depth: 1 had been sent. Depth: 0 targets the collection
+                // resource itself (no match for a query).
+                let depth = req
+                    .headers()
+                    .typed_try_get::<davheaders::Depth>()
+                    .map_err(|_| DavError::Status(StatusCode::BAD_REQUEST))?
+                    .unwrap_or(davheaders::Depth::One);
+                self.handle_addressbook_query(&path, meta.is_dir(), depth, query)
+                    .await
             }
             ParsedCardDavReportType::AddressBookMultiget { hrefs } => {
                 self.handle_addressbook_multiget(&path, hrefs).await
@@ -257,30 +266,38 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     async fn handle_addressbook_query(
         &self,
         path: &DavPath,
+        is_collection: bool,
+        depth: davheaders::Depth,
         query: ParsedAddressBookQuery,
     ) -> DavResult<Response<Body>> {
-        // Get directory listing
-        let mut stream = self
-            .fs
-            .read_dir(path, self.get_read_dir_meta(), &self.credentials)
-            .await?;
+        let mut paths = Vec::new();
+        if !is_collection {
+            // An object-targeted query evaluates that object, never its siblings.
+            paths.push(path.clone());
+        } else if depth != davheaders::Depth::Zero {
+            let mut stream = self
+                .fs
+                .read_dir(path, self.get_read_dir_meta(), &self.credentials)
+                .await?;
+            while let Some(item) = stream.next().await {
+                let Ok(dirent) = item else { continue };
+                if self.hidden_in_listing(dirent.as_ref()).await {
+                    continue;
+                }
+                let mut item_path = path.clone();
+                item_path.push_segment(&dirent.name());
+                paths.push(item_path);
+            }
+        }
         let mut results = Vec::new();
-
         let mut count = 0u32;
-        while let Some(item) = stream.next().await {
+        for item_path in paths {
             // Check limit
             if let Some(limit) = query.query.limit
                 && count >= limit
             {
                 break;
             }
-
-            let Ok(dirent) = item else { continue };
-            if self.hidden_in_listing(dirent.as_ref()).await {
-                continue;
-            }
-            let mut item_path = path.clone();
-            item_path.push_segment(&dirent.name());
 
             // Check if this is a vCard resource, and append content to result
             if let Some((metadata, content)) = self
