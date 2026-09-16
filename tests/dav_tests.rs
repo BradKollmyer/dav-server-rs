@@ -217,8 +217,8 @@ mod multipart_range_tests {
             )
             .await;
         assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
-        // Extract the actual boundary from the Content-Type header up front
-        // (content_type borrows resp, and reading the body moves resp).
+        // Own the boundary from the Content-Type header before resp_to_string
+        // moves resp.
         let boundary = resp
             .headers()
             .get("content-type")
