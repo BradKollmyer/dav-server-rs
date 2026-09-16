@@ -131,6 +131,44 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         .boxed()
     }
 
+    /// Validate an object against the destination collection before any overwrite.
+    #[cfg(any(feature = "caldav", feature = "carddav"))]
+    async fn validate_copy_destination(&self, source: &DavPath, dest: &DavPath) -> DavResult<()> {
+        let parent = dest.parent();
+        let meta = self.fs.metadata(&parent, &self.credentials).await?;
+        let kind = self.collection_kind(&parent, meta.as_ref()).await;
+        let max = match kind {
+            CollectionKind::None => return Ok(()),
+            #[cfg(feature = "caldav")]
+            CollectionKind::Calendar => crate::caldav::DEFAULT_MAX_RESOURCE_SIZE,
+            #[cfg(feature = "carddav")]
+            CollectionKind::Addressbook => crate::carddav::DEFAULT_MAX_RESOURCE_SIZE,
+        };
+        let meta = self.fs.metadata(source, &self.credentials).await?;
+        if meta.is_dir() || meta.len() > max {
+            return Err(StatusCode::FORBIDDEN.into());
+        }
+        let mut file = self
+            .fs
+            .open(source, OpenOptions::read(), &self.credentials)
+            .await?;
+        // Read one byte beyond the limit as well, in case the source grew since
+        // the metadata lookup. Never validate just a truncated prefix.
+        let data = read_file_to_end(file.as_mut(), max as usize + 1).await?;
+        let valid = data.len() as u64 <= max
+            && std::str::from_utf8(&data).is_ok_and(|text| match kind {
+                #[cfg(feature = "caldav")]
+                CollectionKind::Calendar => crate::caldav::validate_calendar_data(text).is_ok(),
+                #[cfg(feature = "carddav")]
+                CollectionKind::Addressbook => crate::carddav::validate_vcard_data(text).is_ok(),
+                CollectionKind::None => true,
+            });
+        if !valid {
+            return Err(StatusCode::FORBIDDEN.into());
+        }
+        Ok(())
+    }
+
     // Right now we handle MOVE with a simple RENAME. RFC4918 #9.9.2 talks
     // about "partially failed moves", which means that we might have to
     // try to move directories with increasing granularity to move as much
@@ -283,6 +321,9 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                 return Err(StatusCode::LOCKED.into());
             }
         }
+
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        self.validate_copy_destination(&path, &dest).await?;
 
         let req_path = path.clone();
 

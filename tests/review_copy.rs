@@ -90,3 +90,88 @@ async fn recursive_copy_omits_hidden_entries_without_following_them() {
     assert_eq!(std::fs::read(root.join("copy/public")).unwrap(), b"public");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(all(feature = "caldav", feature = "carddav"))]
+const ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nBEGIN:VEVENT\r\nUID:one\r\nDTSTART:20260101T120000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+#[cfg(all(feature = "caldav", feature = "carddav"))]
+const VCARD: &str = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:one\r\nFN:Alice\r\nEND:VCARD\r\n";
+
+#[cfg(all(feature = "caldav", feature = "carddav"))]
+#[tokio::test]
+async fn typed_copy_and_move_validate_before_overwrite() {
+    for create in ["MKCALENDAR", "MKADDRESSBOOK"] {
+        let content = if create == "MKCALENDAR" { ICS } else { VCARD };
+        for method in ["COPY", "MOVE"] {
+            let s = DavHandler::builder()
+                .filesystem(dav_server::memfs::MemFs::new())
+                .build_handler();
+            assert_eq!(
+                req(&s, create, "/typed", "", &[]).await.0,
+                StatusCode::CREATED
+            );
+            assert_eq!(
+                req(&s, "PUT", "/typed/object", content, &[]).await.0,
+                StatusCode::CREATED
+            );
+            let oversized = "x".repeat(1024 * 1024 + 1);
+            for rejected in ["invalid", &oversized] {
+                assert!(req(&s, "PUT", "/plain", rejected, &[]).await.0.is_success());
+                for dest in ["/typed/new", "/typed/object"] {
+                    assert_eq!(
+                        req(&s, method, "/plain", "", &[("Destination", dest)])
+                            .await
+                            .0,
+                        StatusCode::FORBIDDEN
+                    );
+                    assert_eq!(
+                        req(&s, "GET", "/typed/object", "", &[]).await,
+                        (StatusCode::OK, content.to_owned())
+                    );
+                    assert_eq!(
+                        req(&s, "GET", "/typed/new", "", &[]).await.0,
+                        StatusCode::NOT_FOUND
+                    );
+                    assert_eq!(
+                        req(&s, "GET", "/plain", "", &[]).await,
+                        (StatusCode::OK, rejected.to_owned())
+                    );
+                }
+            }
+            assert_eq!(
+                req(&s, "MKCOL", "/dir", "", &[]).await.0,
+                StatusCode::CREATED
+            );
+            assert_eq!(
+                req(&s, method, "/dir", "", &[("Destination", "/typed/object")])
+                    .await
+                    .0,
+                StatusCode::FORBIDDEN
+            );
+            assert!(req(&s, "PUT", "/plain", content, &[]).await.0.is_success());
+            assert_eq!(
+                req(
+                    &s,
+                    method,
+                    "/plain",
+                    "",
+                    &[("Destination", "/typed/object")]
+                )
+                .await
+                .0,
+                StatusCode::NO_CONTENT
+            );
+            assert_eq!(
+                req(&s, "GET", "/typed/object", "", &[]).await,
+                (StatusCode::OK, content.to_owned())
+            );
+            assert_eq!(
+                req(&s, "GET", "/plain", "", &[]).await.0,
+                if method == "COPY" {
+                    StatusCode::OK
+                } else {
+                    StatusCode::NOT_FOUND
+                }
+            );
+        }
+    }
+}
