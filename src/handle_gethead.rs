@@ -42,19 +42,33 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     pub(crate) async fn ensure_visible(&self, path: &DavPath) -> DavResult<()> {
         if (self.hide_dot_prefix == DavOptionHide::Always
             || self.hide_dot_prefix == DavOptionHide::ForDirectPaths)
-            && path.file_name_bytes().starts_with(b".")
+            && path
+                .as_bytes()
+                .split(|b| *b == b'/')
+                .any(|name| name.starts_with(b"."))
         {
             return Err(DavError::Status(StatusCode::NOT_FOUND));
         }
 
         if self.hide_symlinks {
-            match self.fs.symlink_metadata(path, &self.credentials).await {
-                Ok(meta) if meta.is_symlink() => {
-                    return Err(DavError::Status(StatusCode::NOT_FOUND));
+            // symlink_metadata only inspects the final component. Walk every
+            // ancestor too, otherwise /hidden-link/visible-file bypasses the
+            // same policy that rejects /hidden-link itself.
+            let mut current = path.clone();
+            loop {
+                match self.fs.symlink_metadata(&current, &self.credentials).await {
+                    Ok(meta) if meta.is_symlink() => {
+                        return Err(DavError::Status(StatusCode::NOT_FOUND));
+                    }
+                    Ok(_) => {}
+                    Err(FsError::NotFound) => {}
+                    Err(e) => return Err(e.into()),
                 }
-                Ok(_) => {}
-                Err(FsError::NotFound) => {}
-                Err(e) => return Err(e.into()),
+                let parent = current.parent();
+                if parent == current {
+                    break;
+                }
+                current = parent;
             }
         }
         Ok(())
