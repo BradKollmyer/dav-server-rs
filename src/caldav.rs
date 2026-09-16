@@ -704,22 +704,21 @@ fn event_occurrences_in_range(
     range_start: DateTime<Utc>,
     range_end: DateTime<Utc>,
 ) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+    let Some((span_start, span_end)) = component_span(event) else {
+        return Vec::new();
+    };
     let base_span = || {
-        component_span(event)
-            .filter(|(start, end)| {
-                time_spans_overlap(*start, *end, Some(range_start), Some(range_end))
-            })
-            .into_iter()
-            .collect()
+        if time_spans_overlap(span_start, span_end, Some(range_start), Some(range_end)) {
+            vec![(span_start, span_end)]
+        } else {
+            Vec::new()
+        }
     };
     let has_recurrence = property_value(event, "RRULE").is_some()
         || event
             .multi_properties()
             .keys()
             .any(|k| k.eq_ignore_ascii_case("RDATE") || k.eq_ignore_ascii_case("EXDATE"));
-    let Some((span_start, span_end)) = component_span(event) else {
-        return Vec::new();
-    };
     if !has_recurrence {
         return base_span();
     }
