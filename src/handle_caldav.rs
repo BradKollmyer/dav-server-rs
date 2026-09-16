@@ -68,7 +68,13 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         match report_type {
             CalDavReportType::CalendarQuery(query) => {
-                self.handle_calendar_query(&path, query).await
+                let depth = req
+                    .headers()
+                    .typed_try_get::<davheaders::Depth>()
+                    .map_err(|_| DavError::Status(StatusCode::BAD_REQUEST))?
+                    .unwrap_or(davheaders::Depth::Zero);
+                self.handle_calendar_query(&path, meta.is_dir(), depth, query)
+                    .await
             }
             CalDavReportType::CalendarMultiget { hrefs } => {
                 self.handle_calendar_multiget(&path, hrefs).await
@@ -322,23 +328,31 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     async fn handle_calendar_query(
         &self,
         path: &DavPath,
+        is_collection: bool,
+        depth: davheaders::Depth,
         query: CalendarQuery,
     ) -> DavResult<Response<Body>> {
-        // Get directory listing
-        let mut stream = self
-            .fs
-            .read_dir(path, self.get_read_dir_meta(), &self.credentials)
-            .await?;
-        let mut results = Vec::new();
-
-        while let Some(item) = stream.next().await {
-            let Ok(dirent) = item else { continue };
-            if self.hidden_in_listing(dirent.as_ref()).await {
-                continue;
+        let mut paths = Vec::new();
+        if !is_collection {
+            // An object-targeted query evaluates that object, never its siblings.
+            paths.push(path.clone());
+        } else if depth != davheaders::Depth::Zero {
+            let mut stream = self
+                .fs
+                .read_dir(path, self.get_read_dir_meta(), &self.credentials)
+                .await?;
+            while let Some(item) = stream.next().await {
+                let Ok(dirent) = item else { continue };
+                if self.hidden_in_listing(dirent.as_ref()).await {
+                    continue;
+                }
+                let mut item_path = path.clone();
+                item_path.push_segment(&dirent.name());
+                paths.push(item_path);
             }
-            let mut item_path = path.clone();
-            item_path.push_segment(&dirent.name());
-
+        }
+        let mut results = Vec::new();
+        for item_path in paths {
             // Check if this is a calendar resource, and append content to result
             if let Some((metadata, content)) = self
                 .read_object_resource(&item_path, DEFAULT_MAX_RESOURCE_SIZE, is_calendar_data)
