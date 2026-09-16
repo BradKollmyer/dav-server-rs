@@ -700,7 +700,7 @@ pub(crate) fn calendar_busy_intervals(
 #[cfg(feature = "caldav")]
 fn event_occurrences_in_range(
     event: &icalendar::Event,
-    calendar: &Calendar,
+    _calendar: &Calendar,
     range_start: DateTime<Utc>,
     range_end: DateTime<Utc>,
 ) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
@@ -727,14 +727,6 @@ fn event_occurrences_in_range(
     let Ok(set) = event.get_recurrence() else {
         return base_span();
     };
-    if calendar
-        .get_timezone()
-        .unwrap_or("UTC")
-        .parse::<chrono_tz::Tz>()
-        .is_err()
-    {
-        return base_span();
-    }
     let tz = set.get_dt_start().timezone();
     let window_in_tz = |utc: DateTime<Utc>| {
         if tz.is_local() {
@@ -1422,6 +1414,26 @@ mod tests {
                 "20240102T130000Z",
                 FreeBusyType::Busy
             )]
+        );
+    }
+
+    #[test]
+    fn non_olson_calendar_timezone_does_not_block_utc_expansion() {
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nX-WR-TIMEZONE:Pacific Standard Time\nBEGIN:VEVENT\nUID:1\nDTSTART:20240101T120000Z\nDTEND:20240101T130000Z\nRRULE:FREQ=DAILY;COUNT=3\nEND:VEVENT\nEND:VCALENDAR";
+        let cal = parse_ics(ics);
+        assert_eq!(
+            calendar_busy_intervals(
+                &cal,
+                parse_caldav_date_time("20240101T000000Z").unwrap(),
+                parse_caldav_date_time("20240201T000000Z").unwrap(),
+            ),
+            (1..=3)
+                .map(|d| busy(
+                    &format!("2024010{d}T120000Z"),
+                    &format!("2024010{d}T130000Z"),
+                    FreeBusyType::Busy
+                ))
+                .collect::<Vec<_>>()
         );
     }
 
