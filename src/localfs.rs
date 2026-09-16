@@ -62,22 +62,27 @@ where
 #[derive(Debug, Clone)]
 struct LocalFsMetaData {
     meta: std::fs::Metadata,
+    /// Filesystem path of a directory whose collection-type sidecars
+    /// (`.dav-calendar` / `.dav-addressbook`) may be probed lazily.
+    /// `None` for files and for metadata without a known path.
+    #[cfg(any(feature = "caldav", feature = "carddav"))]
+    dir_path: Option<PathBuf>,
     #[cfg(feature = "caldav")]
-    is_calendar: bool,
+    is_calendar: OnceLock<bool>,
     #[cfg(feature = "carddav")]
-    is_addressbook: bool,
+    is_addressbook: OnceLock<bool>,
 }
 
 impl LocalFsMetaData {
     #[allow(unused_variables)]
     fn new(path: &Path, meta: std::fs::Metadata) -> Self {
-        #[cfg(any(feature = "caldav", feature = "carddav"))]
-        let is_dir = meta.is_dir();
         LocalFsMetaData {
+            #[cfg(any(feature = "caldav", feature = "carddav"))]
+            dir_path: meta.is_dir().then(|| path.to_path_buf()),
             #[cfg(feature = "caldav")]
-            is_calendar: is_dir && path.join(".dav-calendar").exists(),
+            is_calendar: OnceLock::new(),
             #[cfg(feature = "carddav")]
-            is_addressbook: is_dir && path.join(".dav-addressbook").exists(),
+            is_addressbook: OnceLock::new(),
             meta,
         }
     }
@@ -85,11 +90,23 @@ impl LocalFsMetaData {
     fn from_file_meta(meta: std::fs::Metadata) -> Self {
         LocalFsMetaData {
             meta,
+            #[cfg(any(feature = "caldav", feature = "carddav"))]
+            dir_path: None,
             #[cfg(feature = "caldav")]
-            is_calendar: false,
+            is_calendar: OnceLock::new(),
             #[cfg(feature = "carddav")]
-            is_addressbook: false,
+            is_addressbook: OnceLock::new(),
         }
+    }
+
+    /// Probe (once) whether the directory carries the given sidecar marker.
+    #[cfg(any(feature = "caldav", feature = "carddav"))]
+    fn has_sidecar(&self, cell: &OnceLock<bool>, sidecar: &str) -> bool {
+        *cell.get_or_init(|| {
+            self.dir_path
+                .as_ref()
+                .is_some_and(|dir| dir.join(sidecar).exists())
+        })
     }
 }
 
@@ -1110,11 +1127,11 @@ impl DavMetaData for LocalFsMetaData {
     }
     #[cfg(feature = "caldav")]
     fn is_calendar(&self, _: &DavPath) -> bool {
-        self.is_calendar
+        self.has_sidecar(&self.is_calendar, ".dav-calendar")
     }
     #[cfg(feature = "carddav")]
     fn is_addressbook(&self, _: &DavPath) -> bool {
-        self.is_addressbook
+        self.has_sidecar(&self.is_addressbook, ".dav-addressbook")
     }
 
     #[cfg(unix)]
@@ -1195,6 +1212,43 @@ mod tests {
             filetime_to_systemtime(116444736000000000 + 10_000_000),
             UNIX_EPOCH + Duration::from_secs(1)
         );
+    }
+
+    #[cfg(all(feature = "caldav", feature = "carddav"))]
+    #[test]
+    fn metadata_probes_sidecars_lazily() {
+        let dir = std::env::temp_dir().join(format!(
+            "dav-lazy-sidecar-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let davpath = DavPath::new("/").unwrap();
+
+        // The marker is only looked up when the flag is asked for, so a
+        // sidecar created after the metadata was built is still seen.
+        let meta = LocalFsMetaData::new(&dir, std::fs::metadata(&dir).unwrap());
+        std::fs::write(dir.join(".dav-calendar"), b"").unwrap();
+        assert!(meta.is_calendar(&davpath));
+        assert!(!meta.is_addressbook(&davpath));
+
+        // Once probed, the answer is cached for this metadata instance.
+        std::fs::write(dir.join(".dav-addressbook"), b"").unwrap();
+        assert!(!meta.is_addressbook(&davpath));
+        let fresh = LocalFsMetaData::new(&dir, std::fs::metadata(&dir).unwrap());
+        assert!(fresh.is_addressbook(&davpath));
+
+        // Files never carry a collection type, whichever constructor is used.
+        let file = dir.join("file.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let fmeta = std::fs::metadata(&file).unwrap();
+        assert!(!LocalFsMetaData::new(&file, fmeta.clone()).is_calendar(&davpath));
+        assert!(!LocalFsMetaData::from_file_meta(fmeta).is_addressbook(&davpath));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
