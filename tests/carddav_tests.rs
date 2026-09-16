@@ -981,6 +981,110 @@ END:VCARD"#;
         );
     }
 
+    #[tokio::test]
+    async fn test_carddav_reports_on_plain_collection_are_forbidden() {
+        let server = setup_carddav_server().await;
+        mkcol(&server, "/addressbooks/plain").await;
+
+        let query_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<CARD:addressbook-query xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
+  <D:prop>
+    <CARD:address-data/>
+  </D:prop>
+</CARD:addressbook-query>"#;
+        let multiget_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<CARD:addressbook-multiget xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
+  <D:prop>
+    <CARD:address-data/>
+  </D:prop>
+  <D:href>/addressbooks/plain/contact.vcf</D:href>
+</CARD:addressbook-multiget>"#;
+
+        // A plain MKCOL collection is not an address book: RFC 6352 8.6-8.7
+        // forbids both reports.
+        for body in [query_body, multiget_body] {
+            let req = Request::builder()
+                .method("REPORT")
+                .uri("/addressbooks/plain")
+                .header("Depth", "1")
+                .body(Body::from(body))
+                .unwrap();
+            let resp = server.handle(req).await;
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+
+        // A missing collection is still a 404.
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/addressbooks/missing")
+            .header("Depth", "1")
+            .body(Body::from(query_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // The MKADDRESSBOOK address book still answers.
+        let req = Request::builder()
+            .method("MKADDRESSBOOK")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let vcard = r#"BEGIN:VCARD
+VERSION:3.0
+UID:self-contact@example.com
+FN:Self Contact
+N:Contact;Self;;;
+END:VCARD"#;
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/addressbooks/my-contacts/contact.vcf")
+            .header("Content-Type", "text/vcard")
+            .body(Body::from(vcard))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/addressbooks/my-contacts")
+            .header("Depth", "1")
+            .body(Body::from(query_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("Self Contact"),
+            "addressbook-query on address book missing contact: {body_str}"
+        );
+
+        // RFC 6352 8.6: the REPORT may also be addressed to the address
+        // object resource itself.
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/addressbooks/my-contacts/contact.vcf")
+            .body(Body::from(query_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("HTTP/1.1 200 OK"),
+            "object href must be 200: {body_str}"
+        );
+        assert!(
+            !body_str.contains("404 Not Found"),
+            "object href must not be 404: {body_str}"
+        );
+        assert!(
+            body_str.contains("Self Contact"),
+            "address-data missing: {body_str}"
+        );
+    }
+
     #[test]
     fn test_is_vcard_data() {
         let valid_vcard = b"BEGIN:VCARD\nVERSION:3.0\nFN:Test\nEND:VCARD\n";
