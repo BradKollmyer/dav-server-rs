@@ -23,9 +23,12 @@ struct Range {
     count: u64,
 }
 
-const BOUNDARY: &str = "BOUNDARY";
-const BOUNDARY_START: &str = "\r\n--BOUNDARY\r\n";
-const BOUNDARY_END: &str = "\r\n--BOUNDARY--\r\n";
+// Multipart/byteranges framing uses a per-response boundary so a file whose
+// content happens to contain the marker string cannot corrupt the framing.
+fn multipart_boundary() -> String {
+    format!("dav-server-{}", uuid::Uuid::new_v4().simple())
+}
+
 
 const READ_BUF_SIZE: usize = 16384;
 
@@ -285,6 +288,9 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             }
         }
 
+        // Per-response multipart boundary (used only when ranges.len() > 1).
+        let boundary = multipart_boundary();
+
         if !ranges.is_empty() {
             curpos = ranges[0].start;
 
@@ -300,8 +306,8 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                 res.headers_mut()
                     .insert("Content-Range", r.parse().unwrap());
             } else {
-                // add content-type header.
-                let r = format!("multipart/byteranges; boundary={BOUNDARY}");
+                // add content-type header with the unique boundary.
+                let r = format!("multipart/byteranges; boundary={boundary}");
                 res.headers_mut().insert("Content-Type", r.parse().unwrap());
             }
         } else {
@@ -354,7 +360,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
                     if multipart {
                         let mut hdrs = Vec::new();
-                        let _ = write!(hdrs, "{BOUNDARY_START}");
+                        let _ = write!(hdrs, "\r\n--{boundary}\r\n");
                         let _ = write!(
                             hdrs,
                             "Content-Range: bytes {}-{}/{}\r\n",
@@ -385,7 +391,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     }
                 }
                 if multipart {
-                    tx.send(Bytes::from(BOUNDARY_END)).await;
+                    tx.send(Bytes::from(format!("\r\n--{boundary}--\r\n"))).await;
                 }
                 Ok::<(), std::io::Error>(())
             }

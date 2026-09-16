@@ -217,27 +217,31 @@ mod multipart_range_tests {
             )
             .await;
         assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
-        let content_type = resp
+        // Extract the actual boundary from the Content-Type header up front
+        // (content_type borrows resp, and reading the body moves resp).
+        let boundary = resp
             .headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+            .and_then(|ct| ct.split("boundary=").nth(1))
+            .unwrap_or("")
+            .to_string();
         assert!(
-            content_type.contains("multipart/byteranges"),
-            "expected multipart/byteranges, got {content_type}"
+            boundary.starts_with("dav-server-"),
+            "expected a boundary parameter, got {boundary:?}"
         );
 
         let body = resp_to_string(resp).await;
         assert!(
-            body.contains("\r\n--BOUNDARY\r\n"),
+            body.contains(&format!("\r\n--{boundary}\r\n")),
             "missing CRLF multipart delimiter in {body:?}"
         );
         assert!(
-            !body.contains("\n--BOUNDARY\n"),
+            !body.contains(&format!("\n--{boundary}\n")),
             "Unix-newline delimiter must not be used: {body:?}"
         );
         assert!(
-            body.contains("\r\n--BOUNDARY--\r\n"),
+            body.contains(&format!("\r\n--{boundary}--\r\n")),
             "missing CRLF close-delimiter in {body:?}"
         );
     }
@@ -2501,12 +2505,13 @@ mod get_delete_copymove_tests {
             .await;
         assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
         let ctype = header_str(&resp, "content-type").unwrap_or_default();
+        let boundary = ctype.split("boundary=").nth(1).unwrap_or_default();
         assert!(
-            ctype.contains("multipart/byteranges") && ctype.contains("BOUNDARY"),
+            ctype.contains("multipart/byteranges") && !boundary.is_empty(),
             "content-type: {ctype}"
         );
         let body = resp_to_string(resp).await;
-        assert!(body.contains("--BOUNDARY"), "{body}");
+        assert!(body.contains(&format!("--{boundary}")), "{body}");
         assert!(body.contains("bytes 0-0/11"), "{body}");
         assert!(body.contains("bytes 10-10/11"), "{body}");
         assert!(
@@ -2514,7 +2519,7 @@ mod get_delete_copymove_tests {
             "{body}"
         );
         assert!(body.contains('d'), "{body}");
-        assert!(body.contains("--BOUNDARY--"), "{body}");
+        assert!(body.contains(&format!("--{boundary}--")), "{body}");
     }
 
     #[tokio::test]
