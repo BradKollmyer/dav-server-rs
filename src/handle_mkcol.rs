@@ -7,6 +7,8 @@ use xmltree::Element;
 use crate::body::Body;
 use crate::conditional::*;
 use crate::davheaders;
+#[cfg(any(feature = "proppatch", feature = "caldav", feature = "carddav"))]
+use crate::davpath::DavPath;
 use crate::fs::*;
 use crate::xmltree_ext::ElementExt;
 use crate::{DavError, DavInner, DavResult};
@@ -14,6 +16,24 @@ use crate::{DavError, DavInner, DavResult};
 const NS_DAV_URI: &str = "DAV:";
 
 impl<C: Clone + Send + Sync + 'static> DavInner<C> {
+    /// Undo a newly created collection, including backend type-marker sidecars.
+    /// Only reserved marker files are removed; never recursively delete contents
+    /// that another request may have created in the meantime.
+    #[cfg(any(feature = "proppatch", feature = "caldav", feature = "carddav"))]
+    pub(crate) async fn rollback_created_collection(&self, path: &DavPath) {
+        for name in [b".dav-calendar".as_slice(), b".dav-addressbook".as_slice()] {
+            let mut marker = path.clone();
+            marker.push_segment(name);
+            match self.fs.remove_file(&marker, &self.credentials).await {
+                Ok(()) | Err(FsError::NotFound | FsError::NotImplemented) => {}
+                Err(e) => debug!("failed to remove collection marker during rollback: {e:?}"),
+            }
+        }
+        if let Err(e) = self.fs.remove_dir(path, &self.credentials).await {
+            debug!("failed to remove newly created collection during rollback: {e:?}");
+        }
+    }
+
     /// RFC 4918 MKCOL, plus extended MKCOL (RFC 5689).
     ///
     /// A `DAV:mkcol` body can set properties and, when CalDAV/CardDAV are
@@ -120,19 +140,22 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         // (RFC 4791 5.3.1.2), so undo the create_dir before failing.
         #[cfg(feature = "caldav")]
         if want_calendar && let Err(e) = self.fs.mark_calendar(&path, &self.credentials).await {
-            let _ = self.fs.remove_dir(&path, &self.credentials).await;
+            self.rollback_created_collection(&path).await;
             return Err(e.into());
         }
         #[cfg(feature = "carddav")]
         if want_addressbook && let Err(e) = self.fs.mark_addressbook(&path, &self.credentials).await
         {
-            let _ = self.fs.remove_dir(&path, &self.credentials).await;
+            self.rollback_created_collection(&path).await;
             return Err(e.into());
         }
 
         if let Some(tree) = mkcol_body {
             #[cfg(feature = "proppatch")]
-            self.apply_set_props(&path, &tree).await?;
+            if let Err(e) = self.apply_set_props(&path, &tree).await {
+                self.rollback_created_collection(&path).await;
+                return Err(e);
+            }
             #[cfg(not(feature = "proppatch"))]
             let _ = tree;
         }

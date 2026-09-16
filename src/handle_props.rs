@@ -735,9 +735,6 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     #[cfg(feature = "proppatch")]
     pub(crate) async fn apply_set_props(&self, path: &DavPath, tree: &Element) -> DavResult<()> {
         let can_deadprop = self.fs.have_props(path, &self.credentials).await;
-        if !can_deadprop {
-            return Ok(());
-        }
 
         let props = tree
             .child_elems_iter()
@@ -755,14 +752,21 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         let mut patch = Vec::new();
         for n in props {
             match self.liveprop_set(n, can_deadprop) {
-                StatusCode::CONTINUE => patch.push((true, element_to_davprop_full(n))),
+                StatusCode::CONTINUE if can_deadprop => {
+                    patch.push((true, element_to_davprop_full(n)))
+                }
+                StatusCode::CONTINUE => return Err(DavError::Status(StatusCode::FORBIDDEN)),
                 StatusCode::OK => {}
                 s => return Err(DavError::Status(s)),
             }
         }
 
         if !patch.is_empty() {
-            self.fs.patch_props(path, patch, &self.credentials).await?;
+            let results = self.fs.patch_props(path, patch, &self.credentials).await?;
+            if let Some((status, _)) = results.into_iter().find(|(status, _)| !status.is_success())
+            {
+                return Err(DavError::Status(status));
+            }
         }
         Ok(())
     }

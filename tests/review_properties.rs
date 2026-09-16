@@ -156,3 +156,164 @@ async fn property_and_report_etags_match_get_header() {
         }
     }
 }
+
+#[cfg(feature = "proppatch")]
+fn creation_cases(property: &str) -> Vec<(&'static str, String)> {
+    [
+        ("MKCALENDAR", "C:mkcalendar", "<D:collection/><C:calendar/>"),
+        ("MKCOL", "D:mkcol", "<D:collection/><C:calendar/>"),
+        ("MKCOL", "D:mkcol", "<D:collection/><CARD:addressbook/>"),
+        ("MKADDRESSBOOK", "CARD:mkaddressbook", "<D:collection/><CARD:addressbook/>"),
+    ].into_iter().map(|(method, root, resource_type)| (method, format!(r#"<{root} xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CARD="urn:ietf:params:xml:ns:carddav"><D:set><D:prop><D:resourcetype>{resource_type}</D:resourcetype>{property}</D:prop></D:set></{root}>"#))).collect()
+}
+
+#[cfg(feature = "proppatch")]
+async fn assert_creation_rolled_back(server: &DavHandler, property: &str, expected: StatusCode) {
+    for (index, (method, body)) in creation_cases(property).into_iter().enumerate() {
+        let path = format!("/failed{index}");
+        let result = request(server, method, &path, &body).await;
+        assert_eq!(result.0, expected, "{method}: {result:?}");
+        assert_eq!(
+            request(server, "PROPFIND", &path, "").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(server, method, &path, "").await.0,
+            StatusCode::CREATED
+        );
+    }
+}
+
+#[cfg(feature = "proppatch")]
+#[tokio::test]
+async fn protected_properties_roll_back_typed_collection_creation() {
+    let server = DavHandler::builder()
+        .filesystem(dav_server::memfs::MemFs::new())
+        .build_handler();
+    assert_creation_rolled_back(
+        &server,
+        "<D:getetag>forbidden</D:getetag>",
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+}
+
+#[cfg(all(feature = "proppatch", feature = "localfs"))]
+#[tokio::test]
+async fn localfs_failed_creation_removes_type_marker_sidecars() {
+    let root = std::env::temp_dir().join(format!("dav-rollback-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let server = DavHandler::builder()
+        .filesystem(dav_server::localfs::LocalFs::new(
+            &root, false, false, false,
+        ))
+        .build_handler();
+    assert_creation_rolled_back(
+        &server,
+        "<D:getetag>forbidden</D:getetag>",
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "proppatch")]
+mod backend_failures {
+    use super::*;
+    use dav_server::{
+        davpath::DavPath,
+        fs::{
+            DavDirEntry, DavFile, DavFileSystem, DavMetaData, DavProp, FsError, FsFuture, FsStream,
+            OpenOptions, ReadDirMeta,
+        },
+    };
+
+    #[derive(Clone)]
+    struct RefusingFs(dav_server::memfs::MemFs, bool);
+
+    impl DavFileSystem for RefusingFs {
+        fn open<'a>(
+            &'a self,
+            path: &'a DavPath,
+            options: OpenOptions,
+        ) -> FsFuture<'a, Box<dyn DavFile>> {
+            self.0.open(path, options)
+        }
+        fn read_dir<'a>(
+            &'a self,
+            path: &'a DavPath,
+            meta: ReadDirMeta,
+        ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
+            self.0.read_dir(path, meta)
+        }
+        fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
+            self.0.metadata(path)
+        }
+        fn symlink_metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
+            self.0.symlink_metadata(path)
+        }
+        fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
+            self.0.create_dir(path)
+        }
+        fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
+            self.0.remove_dir(path)
+        }
+        fn have_props<'a>(
+            &'a self,
+            path: &'a DavPath,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            self.0.have_props(path)
+        }
+        fn mark_calendar<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
+            self.0.mark_calendar(path)
+        }
+        fn mark_addressbook<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
+            self.0.mark_addressbook(path)
+        }
+        fn patch_props<'a>(
+            &'a self,
+            _path: &'a DavPath,
+            patch: Vec<(bool, DavProp)>,
+        ) -> FsFuture<'a, Vec<(StatusCode, DavProp)>> {
+            Box::pin(async move {
+                if self.1 {
+                    Err(FsError::InsufficientStorage)
+                } else {
+                    Ok(patch
+                        .into_iter()
+                        .map(|(_, prop)| (StatusCode::FORBIDDEN, prop))
+                        .collect())
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_property_status_rolls_back_creation() {
+        let server = DavHandler::builder()
+            .filesystem(Box::new(RefusingFs(
+                *dav_server::memfs::MemFs::new(),
+                false,
+            )))
+            .build_handler();
+        assert_creation_rolled_back(
+            &server,
+            "<D:displayname>New collection</D:displayname>",
+            StatusCode::FORBIDDEN,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn property_backend_error_rolls_back_creation() {
+        let server = DavHandler::builder()
+            .filesystem(Box::new(RefusingFs(*dav_server::memfs::MemFs::new(), true)))
+            .build_handler();
+        assert_creation_rolled_back(
+            &server,
+            "<D:displayname>New collection</D:displayname>",
+            StatusCode::INSUFFICIENT_STORAGE,
+        )
+        .await;
+    }
+}

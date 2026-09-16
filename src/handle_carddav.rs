@@ -5,7 +5,6 @@ use xmltree::{Element, XMLNode};
 
 use crate::body::Body;
 use crate::errors::*;
-use crate::fs::*;
 use crate::xmltree_ext::ElementExt;
 use crate::{DavInner, DavResult};
 
@@ -62,7 +61,15 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         req: &Request<()>,
         body: &[u8],
     ) -> DavResult<Response<Body>> {
-        let set_props = parse_mkcol_or_mkaddressbook_set_props(body)?;
+        let tree = if body.is_empty() {
+            None
+        } else {
+            let tree = Element::parse2(Cursor::new(body))?;
+            if tree.name != "mkcol" && tree.name != "mkaddressbook" {
+                return Err(DavError::XmlParseError);
+            }
+            Some(tree)
+        };
         let path = self.path(req);
         let parent = path.parent();
         if let Ok(meta) = self.fs.metadata(&parent, &self.credentials).await
@@ -72,23 +79,19 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         }
         let resp = self.handle_mkcol(req, &[]).await?;
         if let Err(e) = self.fs.mark_addressbook(&path, &self.credentials).await {
-            let _ = self.fs.remove_dir(&path, &self.credentials).await;
+            self.rollback_created_collection(&path).await;
             return Err(e.into());
         }
-        self.apply_mkcol_set_props(&path, set_props).await;
+        if let Some(tree) = tree {
+            #[cfg(feature = "proppatch")]
+            if let Err(e) = self.apply_set_props(&path, &tree).await {
+                self.rollback_created_collection(&path).await;
+                return Err(e);
+            }
+            #[cfg(not(feature = "proppatch"))]
+            let _ = tree;
+        }
         Ok(resp)
-    }
-
-    async fn apply_mkcol_set_props(&self, path: &DavPath, props: Vec<DavProp>) {
-        #[cfg(feature = "proppatch")]
-        if !props.is_empty() && self.fs.have_props(path, &self.credentials).await {
-            let patch = props.into_iter().map(|p| (true, p)).collect();
-            let _ = self.fs.patch_props(path, patch, &self.credentials).await;
-        }
-        #[cfg(not(feature = "proppatch"))]
-        {
-            let _ = (path, props);
-        }
     }
 
     fn parse_carddav_report_request(&self, root: &Element) -> DavResult<CardDavReportType> {
@@ -325,48 +328,5 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         }));
 
         Ok(resp)
-    }
-}
-
-/// Empty body: no props. Otherwise the root must be `mkcol` or `mkaddressbook`.
-fn parse_mkcol_or_mkaddressbook_set_props(body: &[u8]) -> DavResult<Vec<DavProp>> {
-    if body.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let tree = Element::parse2(Cursor::new(body))?;
-    if tree.name != "mkcol" && tree.name != "mkaddressbook" {
-        return Err(DavError::XmlParseError);
-    }
-
-    let mut props = Vec::new();
-    for set in tree.child_elems_iter() {
-        if set.name != "set" {
-            continue;
-        }
-        for prop_elem in set.child_elems_iter() {
-            if prop_elem.name != "prop" {
-                continue;
-            }
-            for n in prop_elem.child_elems_iter() {
-                if n.name == "resourcetype" {
-                    continue;
-                }
-                props.push(element_to_davprop_full(n));
-            }
-        }
-    }
-    Ok(props)
-}
-
-fn element_to_davprop_full(elem: &Element) -> DavProp {
-    let mut emitter = xml::writer::EventWriter::new(Cursor::new(Vec::new()));
-    elem.write_ev(&mut emitter).ok();
-    let xml = emitter.into_inner().into_inner();
-    DavProp {
-        name: elem.name.clone(),
-        prefix: elem.prefix.clone(),
-        namespace: elem.namespace.clone(),
-        xml: Some(xml),
     }
 }
