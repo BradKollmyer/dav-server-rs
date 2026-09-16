@@ -1193,15 +1193,9 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                                 self.fs.get_props(path, docontent, &self.credentials).await
                             {
                                 for prop_item in props {
-                                    // Match the exact property name (or a
-                                    // prefixed form like "C:calendar-description"),
-                                    // not merely any prop whose name contains it.
-                                    let bare = prop_item
-                                        .name
-                                        .rsplit(':')
-                                        .next()
-                                        .unwrap_or(&prop_item.name);
-                                    if bare == "calendar-description" {
+                                    if prop_item.name == "calendar-description"
+                                        && prop_item.namespace.as_deref() == Some(NS_CALDAV_URI)
+                                    {
                                         return Ok(StatusElement {
                                             status: StatusCode::OK,
                                             element: davprop_to_element(prop_item),
@@ -1258,12 +1252,9 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                                 self.fs.get_props(path, docontent, &self.credentials).await
                             {
                                 for prop_item in props {
-                                    let bare = prop_item
-                                        .name
-                                        .rsplit(':')
-                                        .next()
-                                        .unwrap_or(&prop_item.name);
-                                    if bare == "addressbook-description" {
+                                    if prop_item.name == "addressbook-description"
+                                        && prop_item.namespace.as_deref() == Some(NS_CARDDAV_URI)
+                                    {
                                         return Ok(StatusElement {
                                             status: StatusCode::OK,
                                             element: davprop_to_element(prop_item),

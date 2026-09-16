@@ -198,6 +198,78 @@ async fn carddav_report_omits_empty_200_propstat() {
 }
 
 #[cfg(feature = "proppatch")]
+#[tokio::test]
+async fn descriptions_match_local_name_and_namespace() {
+    let server = DavHandler::builder()
+        .filesystem(dav_server::memfs::MemFs::new())
+        .build_handler();
+    assert_eq!(
+        request(&server, "MKCALENDAR", "/cal", "").await.0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        request(&server, "MKADDRESSBOOK", "/people", "").await.0,
+        StatusCode::CREATED
+    );
+    for (path, ns, prefix, name, value) in [
+        (
+            "/cal",
+            "urn:ietf:params:xml:ns:caldav",
+            "C",
+            "calendar-description",
+            "Personal",
+        ),
+        (
+            "/people",
+            "urn:ietf:params:xml:ns:carddav",
+            "CARD",
+            "addressbook-description",
+            "Contacts",
+        ),
+    ] {
+        let other = format!(
+            r#"<D:propertyupdate xmlns:D="DAV:" xmlns:X="urn:example"><D:set><D:prop><X:{name}>Wrong</X:{name}></D:prop></D:set></D:propertyupdate>"#
+        );
+        assert_eq!(
+            request(&server, "PROPPATCH", path, &other).await.0,
+            StatusCode::MULTI_STATUS
+        );
+        let find = format!(
+            r#"<D:propfind xmlns:D="DAV:" xmlns:{prefix}="{ns}"><D:prop><{prefix}:{name}/></D:prop></D:propfind>"#
+        );
+        let (status, xml) = request(&server, "PROPFIND", path, &find).await;
+        assert_eq!(status, StatusCode::MULTI_STATUS, "{xml}");
+        assert!(
+            xml.contains("404"),
+            "foreign-namespace {name} must not match: {xml}"
+        );
+        assert!(!xml.contains("Wrong"), "{xml}");
+
+        let set = format!(
+            r#"<D:propertyupdate xmlns:D="DAV:" xmlns:{prefix}="{ns}"><D:set><D:prop><{prefix}:{name}>{value}</{prefix}:{name}></D:prop></D:set></D:propertyupdate>"#
+        );
+        assert_eq!(
+            request(&server, "PROPPATCH", path, &set).await.0,
+            StatusCode::MULTI_STATUS
+        );
+        let (status, xml) = request(&server, "PROPFIND", path, &find).await;
+        assert_eq!(status, StatusCode::MULTI_STATUS, "{xml}");
+        let tree = xmltree::Element::parse(xml.as_bytes()).unwrap();
+        let elem = tree
+            .get_child("response")
+            .unwrap()
+            .get_child("propstat")
+            .unwrap()
+            .get_child("prop")
+            .unwrap()
+            .get_child(name)
+            .unwrap();
+        assert_eq!(elem.namespace.as_deref(), Some(ns), "{xml}");
+        assert_eq!(elem.get_text().unwrap(), value, "{xml}");
+    }
+}
+
+#[cfg(feature = "proppatch")]
 fn creation_cases(property: &str) -> Vec<(&'static str, String)> {
     [
         ("MKCALENDAR", "C:mkcalendar", "<D:collection/><C:calendar/>"),
