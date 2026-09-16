@@ -416,13 +416,14 @@ impl LocalFs {
                 let path = this.confine_leaf(&path)?;
                 let mut sidecar = path;
                 push_normal_component(&mut sidecar, OsStr::new(&name))?;
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(&sidecar)
-                    .map(|_| ())
-                    .map_err(FsError::from)
+                // A pre-planted symlink named like the sidecar must not be
+                // truncated through to a file outside the share.
+                Self::reject_symlink(&sidecar)?;
+                let mut opts = std::fs::OpenOptions::new();
+                opts.write(true).create(true).truncate(true);
+                #[cfg(unix)]
+                opts.custom_flags(libc::O_NOFOLLOW);
+                opts.open(&sidecar).map(|_| ()).map_err(FsError::from)
             })
             .await
         }
