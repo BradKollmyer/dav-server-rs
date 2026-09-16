@@ -755,9 +755,21 @@ fn event_occurrences_in_range(
         }
     };
     let window_start = range_start - duration;
-    set.after(window_in_tz(window_start))
+    let result = set
+        .after(window_in_tz(window_start))
         .before(window_in_tz(range_end))
-        .all(MAX_OCCURRENCE_EXPANSION)
+        .all(MAX_OCCURRENCE_EXPANSION);
+    if result.limited {
+        match event.get_uid() {
+            Some(uid) => log::warn!(
+                "free-busy occurrence expansion hit the per-event cap of {MAX_OCCURRENCE_EXPANSION} for UID {uid}"
+            ),
+            None => log::warn!(
+                "free-busy occurrence expansion hit the per-event cap of {MAX_OCCURRENCE_EXPANSION}"
+            ),
+        }
+    }
+    result
         .dates
         .into_iter()
         .map(|occ| {
