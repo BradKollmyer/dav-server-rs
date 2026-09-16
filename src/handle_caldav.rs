@@ -342,7 +342,9 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                 .await
                 && self.matches_query(&content, &query)
             {
-                let etag = metadata.etag().unwrap_or_default().to_string();
+                let etag = crate::davheaders::ETag::from_meta(metadata.as_ref())
+                    .map(|etag| etag.to_string())
+                    .unwrap_or_default();
                 results.push((item_path, etag, content));
             }
         }
@@ -371,7 +373,9 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     .read_object_resource(&item_path, DEFAULT_MAX_RESOURCE_SIZE, is_calendar_data)
                     .await
             {
-                let etag = metadata.etag().unwrap_or_default().to_string();
+                let etag = crate::davheaders::ETag::from_meta(metadata.as_ref())
+                    .map(|etag| etag.to_string())
+                    .unwrap_or_default();
                 results.push((item_path, etag, content));
                 continue;
             }
