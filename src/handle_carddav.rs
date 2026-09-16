@@ -14,6 +14,19 @@ use crate::dav_filters::hrefs_from;
 use crate::davpath::DavPath;
 use crate::handle_props::PropWriter;
 
+enum ParsedCardDavReportType {
+    AddressBookQuery(ParsedAddressBookQuery),
+    AddressBookMultiget { hrefs: Vec<String> },
+}
+
+fn filter_test(elem: &Element) -> DavResult<FilterTest> {
+    match elem.attributes.get("test").map(String::as_str) {
+        None | Some("anyof") => Ok(FilterTest::AnyOf),
+        Some("allof") => Ok(FilterTest::AllOf),
+        _ => Err(DavError::Status(StatusCode::BAD_REQUEST)),
+    }
+}
+
 impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     /// Handle REPORT method when only CardDAV is enabled (not CalDAV)
     ///
@@ -43,10 +56,10 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         let report_type = self.parse_carddav_report_request(root)?;
 
         match report_type {
-            CardDavReportType::AddressBookQuery(query) => {
+            ParsedCardDavReportType::AddressBookQuery(query) => {
                 self.handle_addressbook_query(&path, query).await
             }
-            CardDavReportType::AddressBookMultiget { hrefs } => {
+            ParsedCardDavReportType::AddressBookMultiget { hrefs } => {
                 self.handle_addressbook_multiget(&path, hrefs).await
             }
         }
@@ -94,38 +107,49 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         Ok(resp)
     }
 
-    fn parse_carddav_report_request(&self, root: &Element) -> DavResult<CardDavReportType> {
+    fn parse_carddav_report_request(&self, root: &Element) -> DavResult<ParsedCardDavReportType> {
         match root.name.as_str() {
             "addressbook-query" => {
                 let query = self.parse_addressbook_query(root)?;
-                Ok(CardDavReportType::AddressBookQuery(query))
+                Ok(ParsedCardDavReportType::AddressBookQuery(query))
             }
             "addressbook-multiget" => {
                 let hrefs = hrefs_from(root);
-                Ok(CardDavReportType::AddressBookMultiget { hrefs })
+                Ok(ParsedCardDavReportType::AddressBookMultiget { hrefs })
             }
             _ => Err(DavError::StatusClose(StatusCode::BAD_REQUEST)),
         }
     }
 
-    fn parse_addressbook_query(&self, root: &Element) -> DavResult<AddressBookQuery> {
-        let mut query = AddressBookQuery {
-            prop_filter: None,
-            properties: Vec::new(),
-            limit: None,
+    fn parse_addressbook_query(&self, root: &Element) -> DavResult<ParsedAddressBookQuery> {
+        let mut query = ParsedAddressBookQuery {
+            query: AddressBookQuery {
+                prop_filter: None,
+                properties: Vec::new(),
+                limit: None,
+            },
+            filters: Vec::new(),
+            test: FilterTest::AnyOf,
         };
+        let mut have_filter = false;
 
         for child in &root.children {
             if let XMLNode::Element(elem) = child {
                 match elem.name.as_str() {
                     "filter" => {
-                        // Parse prop-filter elements
+                        if have_filter {
+                            return Err(DavError::Status(StatusCode::BAD_REQUEST));
+                        }
+                        have_filter = true;
+                        query.test = filter_test(elem)?;
+                        // Retain every property predicate in the filter.
                         for filter_child in &elem.children {
                             if let XMLNode::Element(filter_elem) = filter_child
                                 && filter_elem.name == "prop-filter"
                             {
-                                query.prop_filter =
-                                    Some(self.parse_carddav_property_filter(filter_elem)?);
+                                query
+                                    .filters
+                                    .push(self.parse_carddav_property_filter(filter_elem)?);
                             }
                         }
                     }
@@ -133,7 +157,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                         // Parse requested properties
                         for prop_child in &elem.children {
                             if let XMLNode::Element(prop_elem) = prop_child {
-                                query.properties.push(prop_elem.name.clone());
+                                query.query.properties.push(prop_elem.name.clone());
                             }
                         }
                     }
@@ -150,7 +174,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                                     }
                                 })
                             {
-                                query.limit = text.parse().ok();
+                                query.query.limit = text.parse().ok();
                             }
                         }
                     }
@@ -162,18 +186,19 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         Ok(query)
     }
 
-    fn parse_carddav_property_filter(&self, elem: &Element) -> DavResult<PropertyFilter> {
+    fn parse_carddav_property_filter(&self, elem: &Element) -> DavResult<ParsedPropertyFilter> {
         let name = elem
             .attributes
             .get("name")
             .ok_or(DavError::StatusClose(StatusCode::BAD_REQUEST))?
             .clone();
 
-        let mut filter = PropertyFilter {
+        let mut filter = ParsedPropertyFilter {
             name,
             is_not_defined: false,
-            text_match: None,
+            text_matches: Vec::new(),
             param_filters: Vec::new(),
+            test: filter_test(elem)?,
         };
 
         for child in &elem.children {
@@ -183,7 +208,9 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                         filter.is_not_defined = true;
                     }
                     "text-match" => {
-                        filter.text_match = Some(TextMatch::from_element(child_elem));
+                        filter
+                            .text_matches
+                            .push(TextMatch::from_element(child_elem));
                     }
                     "param-filter" => {
                         filter
@@ -195,13 +222,18 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             }
         }
 
+        if filter.is_not_defined
+            && (!filter.text_matches.is_empty() || !filter.param_filters.is_empty())
+        {
+            return Err(DavError::Status(StatusCode::BAD_REQUEST));
+        }
         Ok(filter)
     }
 
     async fn handle_addressbook_query(
         &self,
         path: &DavPath,
-        query: AddressBookQuery,
+        query: ParsedAddressBookQuery,
     ) -> DavResult<Response<Body>> {
         // Get directory listing
         let mut stream = self
@@ -213,7 +245,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         let mut count = 0u32;
         while let Some(item) = stream.next().await {
             // Check limit
-            if let Some(limit) = query.limit
+            if let Some(limit) = query.query.limit
                 && count >= limit
             {
                 break;
@@ -230,7 +262,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
             if let Some((metadata, content)) = self
                 .read_object_resource(&item_path, DEFAULT_MAX_RESOURCE_SIZE, is_vcard_data)
                 .await
-                && self.matches_addressbook_query(&content, &query)
+                && addressbook_matches_parsed_query(&content, &query)
             {
                 let etag = crate::davheaders::ETag::from_meta(metadata.as_ref())
                     .map(|etag| etag.to_string())
@@ -276,10 +308,6 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
         self.generate_addressbook_multiget_response(results, missing_hrefs)
             .await
-    }
-
-    fn matches_addressbook_query(&self, content: &str, query: &AddressBookQuery) -> bool {
-        addressbook_matches_query(content, query)
     }
 
     #[cfg(feature = "carddav")]

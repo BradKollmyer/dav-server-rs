@@ -68,6 +68,37 @@ pub struct PropertyFilter {
     pub param_filters: Vec<ParameterFilter>,
 }
 
+// The wire format supports lists and test operators. Keep these internal so
+// existing users can continue constructing the public single-filter structs.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FilterTest {
+    AnyOf,
+    AllOf,
+}
+
+impl FilterTest {
+    fn matches(self, mut conditions: impl Iterator<Item = bool>) -> bool {
+        match self {
+            Self::AnyOf => conditions.any(|matched| matched),
+            Self::AllOf => conditions.all(|matched| matched),
+        }
+    }
+}
+
+pub(crate) struct ParsedAddressBookQuery {
+    pub query: AddressBookQuery,
+    pub filters: Vec<ParsedPropertyFilter>,
+    pub test: FilterTest,
+}
+
+pub(crate) struct ParsedPropertyFilter {
+    pub name: String,
+    pub is_not_defined: bool,
+    pub text_matches: Vec<TextMatch>,
+    pub param_filters: Vec<ParameterFilter>,
+    pub test: FilterTest,
+}
+
 /// CardDAV REPORT request types
 #[derive(Debug, Clone)]
 pub enum CardDavReportType {
@@ -150,11 +181,65 @@ pub fn is_vcard_data(content: &[u8]) -> bool {
     trimmed.ends_with(b"END:VCARD")
 }
 
+pub(crate) fn addressbook_matches_parsed_query(
+    content: &str,
+    query: &ParsedAddressBookQuery,
+) -> bool {
+    if query.filters.is_empty() {
+        return true;
+    }
+    let Ok(vcard) = validate_vcard_data(content) else {
+        return false;
+    };
+    query.test.matches(query.filters.iter().map(|pf| {
+        let entries: Vec<_> = vcard
+            .entries
+            .iter()
+            .filter(|e| e.name.as_str().eq_ignore_ascii_case(&pf.name))
+            .collect();
+        if pf.is_not_defined {
+            return entries.is_empty();
+        }
+        if entries.is_empty() {
+            return false;
+        }
+        if pf.text_matches.is_empty() && pf.param_filters.is_empty() {
+            return true;
+        }
+        if pf.param_filters.is_empty() {
+            let values: Vec<_> = entries
+                .iter()
+                .flat_map(|e| e.values.iter().filter_map(vcard_value_text))
+                .collect();
+            return pf.test.matches(
+                pf.text_matches
+                    .iter()
+                    .map(|tm| tm.matches_any(values.iter().map(String::as_str))),
+            );
+        }
+        // Keep parameter predicates attached to the property instance whose
+        // text is being matched, rather than borrowing another instance's params.
+        entries.iter().any(|entry| {
+            let values: Vec<_> = entry.values.iter().filter_map(vcard_value_text).collect();
+            let text = pf
+                .text_matches
+                .iter()
+                .map(|tm| tm.matches_any(values.iter().map(String::as_str)));
+            let params = pf
+                .param_filters
+                .iter()
+                .map(|paf| vcard_entry_matches_param_filter(entry, paf));
+            pf.test.matches(text.chain(params))
+        })
+    }))
+}
+
 /// Evaluate an `addressbook-query` filter against vCard text.
 ///
 /// Unparseable data does not match (the REPORT skips that resource).
 /// Matching is property-scoped `text-match` plus optional `param-filter`.
 #[cfg(feature = "carddav")]
+#[allow(dead_code)]
 pub(crate) fn addressbook_matches_query(content: &str, query: &AddressBookQuery) -> bool {
     let Some(pf) = query.prop_filter.as_ref() else {
         return true;
