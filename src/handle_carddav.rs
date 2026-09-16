@@ -1,7 +1,6 @@
 use futures_util::StreamExt;
 use http::{Request, Response, StatusCode};
 use std::io::Cursor;
-use xml::reader::{EventReader, XmlEvent};
 use xmltree::{Element, XMLNode};
 
 use crate::body::Body;
@@ -27,20 +26,22 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         req: &Request<()>,
         body: &[u8],
     ) -> DavResult<Response<Body>> {
-        self.handle_carddav_report(req, body).await
+        let root = Element::parse2(Cursor::new(body))?;
+        self.handle_carddav_report(req, &root).await
     }
 
     /// Handle CardDAV REPORT method for addressbook-query and addressbook-multiget
+    ///
+    /// `root` is the already parsed root element of the REPORT request body.
     pub(crate) async fn handle_carddav_report(
         &self,
         req: &Request<()>,
-        body: &[u8],
+        root: &Element,
     ) -> DavResult<Response<Body>> {
         let path = self.path(req);
         self.ensure_visible(&path).await?;
 
-        // Parse the REPORT request body
-        let report_type = self.parse_carddav_report_request(body)?;
+        let report_type = self.parse_carddav_report_request(root)?;
 
         match report_type {
             CardDavReportType::AddressBookQuery(query) => {
@@ -90,74 +91,17 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         }
     }
 
-    fn parse_carddav_report_request(&self, body: &[u8]) -> DavResult<CardDavReportType> {
-        if body.is_empty() {
-            return Err(DavError::StatusClose(StatusCode::BAD_REQUEST));
-        }
-
-        let cursor = Cursor::new(body);
-        let parser = EventReader::new(cursor);
-        let mut elements: Vec<Element> = Vec::new();
-        let mut current_element: Option<Element> = None;
-        let mut element_stack: Vec<Element> = Vec::new();
-
-        for event in parser {
-            match event {
-                Ok(XmlEvent::StartElement {
-                    name,
-                    attributes,
-                    namespace,
-                }) => {
-                    let mut elem = Element::new(&name.local_name);
-                    if let Some(prefix) = name.prefix
-                        && let Some(uri) = namespace.get(&prefix)
-                    {
-                        elem.namespace = Some(uri.to_string());
-                    }
-
-                    for attr in attributes {
-                        elem.attributes.insert(attr.name.local_name, attr.value);
-                    }
-
-                    if let Some(parent) = current_element.take() {
-                        element_stack.push(parent);
-                    }
-                    current_element = Some(elem);
-                }
-                Ok(XmlEvent::EndElement { .. }) => {
-                    if let Some(elem) = current_element.take() {
-                        if let Some(mut parent) = element_stack.pop() {
-                            parent.children.push(XMLNode::Element(elem));
-                            current_element = Some(parent);
-                        } else {
-                            elements.push(elem);
-                        }
-                    }
-                }
-                Ok(XmlEvent::Characters(text)) => {
-                    if let Some(ref mut elem) = current_element {
-                        elem.children.push(XMLNode::Text(text));
-                    }
-                }
-                _ => {}
+    fn parse_carddav_report_request(&self, root: &Element) -> DavResult<CardDavReportType> {
+        match root.name.as_str() {
+            "addressbook-query" => {
+                let query = self.parse_addressbook_query(root)?;
+                Ok(CardDavReportType::AddressBookQuery(query))
             }
-        }
-
-        // Parse the root element to determine report type
-        if let Some(root) = elements.first() {
-            match root.name.as_str() {
-                "addressbook-query" => {
-                    let query = self.parse_addressbook_query(root)?;
-                    Ok(CardDavReportType::AddressBookQuery(query))
-                }
-                "addressbook-multiget" => {
-                    let hrefs = hrefs_from(root);
-                    Ok(CardDavReportType::AddressBookMultiget { hrefs })
-                }
-                _ => Err(DavError::StatusClose(StatusCode::BAD_REQUEST)),
+            "addressbook-multiget" => {
+                let hrefs = hrefs_from(root);
+                Ok(CardDavReportType::AddressBookMultiget { hrefs })
             }
-        } else {
-            Err(DavError::StatusClose(StatusCode::BAD_REQUEST))
+            _ => Err(DavError::StatusClose(StatusCode::BAD_REQUEST)),
         }
     }
 

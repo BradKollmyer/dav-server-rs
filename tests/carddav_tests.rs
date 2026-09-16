@@ -574,6 +574,34 @@ END:VCARD"#;
     }
 
     #[tokio::test]
+    async fn test_addressbook_report_truncated_body_is_bad_request() {
+        let server = setup_carddav_server().await;
+
+        let req = Request::builder()
+            .method("MKADDRESSBOOK")
+            .uri("/addressbooks/my-contacts")
+            .body(Body::empty())
+            .unwrap();
+        let _ = server.handle(req).await;
+
+        // The body is cut off before the root element is closed.
+        let truncated = r#"<?xml version="1.0" encoding="utf-8" ?>
+<CARD:addressbook-query xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
+  <D:prop>
+    <CARD:address-data/>"#;
+
+        let req = Request::builder()
+            .method("REPORT")
+            .uri("/addressbooks/my-contacts")
+            .header("Depth", "1")
+            .body(Body::from(truncated))
+            .unwrap();
+
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn test_addressbook_query_email_text_match_ignores_fn() {
         let server = setup_carddav_server().await;
 

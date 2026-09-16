@@ -916,6 +916,26 @@ END:VCALENDAR"
     }
 
     #[tokio::test]
+    async fn test_report_truncated_body_is_bad_request() {
+        let server = setup_caldav_server2().await;
+
+        // The body is cut off before the root element is closed.
+        let truncated = r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">"#;
+
+        let (status, _) = report_calendar_query(&server, truncated).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = report_calendar_query(&server, "").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn test_calendar_query_time_range_excludes_outside_event() {
         let server = setup_caldav_server2().await;
         put_ics_data(

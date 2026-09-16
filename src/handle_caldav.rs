@@ -2,7 +2,6 @@ use futures_util::StreamExt;
 use headers::HeaderMapExt;
 use http::{Request, Response, StatusCode};
 use std::io::Cursor;
-use xml::reader::{EventReader, XmlEvent};
 use xmltree::{Element, XMLNode};
 
 use crate::body::Body;
@@ -22,24 +21,30 @@ use crate::handle_props::PropWriter;
 impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     /// Handle REPORT method for CalDAV and CardDAV
     ///
-    /// This method detects the namespace of the request body and routes
-    /// to the appropriate CalDAV or CardDAV handler.
+    /// This method parses the request body once and routes on the root
+    /// element's namespace and name to the CalDAV or CardDAV handler.
     pub(crate) async fn handle_report(
         &self,
         req: &Request<()>,
         body: &[u8],
     ) -> DavResult<Response<Body>> {
-        // First, check if this is a CardDAV request by looking for CardDAV elements
+        let root = Element::parse2(Cursor::new(body))?;
+
         #[cfg(feature = "carddav")]
-        if self.is_carddav_report(body) {
-            return self.handle_carddav_report(req, body).await;
+        if root.namespace.as_deref() == Some(crate::carddav::NS_CARDDAV_URI)
+            || matches!(
+                root.name.as_str(),
+                "addressbook-query" | "addressbook-multiget"
+            )
+        {
+            return self.handle_carddav_report(req, &root).await;
         }
 
         let path = self.path(req);
         self.ensure_visible(&path).await?;
 
         // Parse the REPORT request body as CalDAV
-        let report_type = self.parse_report_request(body)?;
+        let report_type = self.parse_report_request(&root)?;
 
         // RFC 4791 7.8-7.10: these reports are scoped to calendar collections,
         // and supported-report-set only advertises them there. calendar-query
@@ -72,49 +77,6 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                 self.handle_freebusy_query(&path, time_range).await
             }
         }
-    }
-
-    /// Check if the REPORT request body is a CardDAV request
-    ///
-    /// This parses the XML root element to check if it's a CardDAV request
-    /// by examining the namespace and element name.
-    #[cfg(feature = "carddav")]
-    fn is_carddav_report(&self, body: &[u8]) -> bool {
-        use crate::carddav::NS_CARDDAV_URI;
-
-        if body.is_empty() {
-            return false;
-        }
-
-        // Parse just enough to get the root element's name and namespace
-        let cursor = Cursor::new(body);
-        let parser = EventReader::new(cursor);
-
-        for event in parser {
-            match event {
-                Ok(XmlEvent::StartElement {
-                    name, namespace, ..
-                }) => {
-                    // Check if this is a CardDAV element by namespace
-                    if let Some(prefix) = &name.prefix
-                        && let Some(uri) = namespace.get(prefix)
-                        && uri == NS_CARDDAV_URI
-                    {
-                        return true;
-                    }
-
-                    // Also check by element name for common CardDAV REPORT types
-                    match name.local_name.as_str() {
-                        "addressbook-query" | "addressbook-multiget" => return true,
-                        _ => return false,
-                    }
-                }
-                Err(_) => return false,
-                _ => continue,
-            }
-        }
-
-        false
     }
 
     /// Handle CalDAV MKCALENDAR method
@@ -195,78 +157,21 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         Ok(resp)
     }
 
-    fn parse_report_request(&self, body: &[u8]) -> DavResult<CalDavReportType> {
-        if body.is_empty() {
-            return Err(DavError::StatusClose(StatusCode::BAD_REQUEST));
-        }
-
-        let cursor = Cursor::new(body);
-        let parser = EventReader::new(cursor);
-        let mut elements: Vec<Element> = Vec::new();
-        let mut current_element: Option<Element> = None;
-        let mut element_stack: Vec<Element> = Vec::new();
-
-        for event in parser {
-            match event {
-                Ok(XmlEvent::StartElement {
-                    name,
-                    attributes,
-                    namespace,
-                }) => {
-                    let mut elem = Element::new(&name.local_name);
-                    if let Some(prefix) = name.prefix
-                        && let Some(uri) = namespace.get(&prefix)
-                    {
-                        elem.namespace = Some(uri.to_string());
-                    }
-
-                    for attr in attributes {
-                        elem.attributes.insert(attr.name.local_name, attr.value);
-                    }
-
-                    if let Some(parent) = current_element.take() {
-                        element_stack.push(parent);
-                    }
-                    current_element = Some(elem);
-                }
-                Ok(XmlEvent::EndElement { .. }) => {
-                    if let Some(elem) = current_element.take() {
-                        if let Some(mut parent) = element_stack.pop() {
-                            parent.children.push(XMLNode::Element(elem));
-                            current_element = Some(parent);
-                        } else {
-                            elements.push(elem);
-                        }
-                    }
-                }
-                Ok(XmlEvent::Characters(text)) => {
-                    if let Some(ref mut elem) = current_element {
-                        elem.children.push(XMLNode::Text(text));
-                    }
-                }
-                _ => {}
+    fn parse_report_request(&self, root: &Element) -> DavResult<CalDavReportType> {
+        match root.name.as_str() {
+            "calendar-query" => {
+                let query = self.parse_calendar_query(root)?;
+                Ok(CalDavReportType::CalendarQuery(query))
             }
-        }
-
-        // Parse the root element to determine report type
-        if let Some(root) = elements.first() {
-            match root.name.as_str() {
-                "calendar-query" => {
-                    let query = self.parse_calendar_query(root)?;
-                    Ok(CalDavReportType::CalendarQuery(query))
-                }
-                "calendar-multiget" => {
-                    let hrefs = hrefs_from(root);
-                    Ok(CalDavReportType::CalendarMultiget { hrefs })
-                }
-                "free-busy-query" => {
-                    let time_range = self.parse_freebusy_query(root)?;
-                    Ok(CalDavReportType::FreeBusyQuery { time_range })
-                }
-                _ => Err(DavError::StatusClose(StatusCode::BAD_REQUEST)),
+            "calendar-multiget" => {
+                let hrefs = hrefs_from(root);
+                Ok(CalDavReportType::CalendarMultiget { hrefs })
             }
-        } else {
-            Err(DavError::StatusClose(StatusCode::BAD_REQUEST))
+            "free-busy-query" => {
+                let time_range = self.parse_freebusy_query(root)?;
+                Ok(CalDavReportType::FreeBusyQuery { time_range })
+            }
+            _ => Err(DavError::StatusClose(StatusCode::BAD_REQUEST)),
         }
     }
 
