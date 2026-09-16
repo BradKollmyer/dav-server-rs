@@ -673,7 +673,7 @@ impl DavFileSystem for LocalFs {
                     use std::os::unix::fs::MetadataExt;
                     let from = std::fs::metadata(from)?;
                     let to = std::fs::metadata(to)?;
-                    return Ok(from.dev() == to.dev() && from.ino() == to.ino());
+                    Ok(from.dev() == to.dev() && from.ino() == to.ino())
                 }
                 #[cfg(not(unix))]
                 Ok(false)
