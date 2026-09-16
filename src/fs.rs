@@ -62,13 +62,13 @@ impl From<&std::io::Error> for FsError {
     fn from(e: &std::io::Error) -> Self {
         use std::io::ErrorKind;
 
+        // Windows raw OS errors are Win32 codes, not libc errno values.
+        // Use Rust's portable ErrorKind mapping for those below.
+        #[cfg(unix)]
         if let Some(errno) = e.raw_os_error() {
             // specific errors.
             match errno {
-                #[cfg(unix)]
                 libc::EMLINK | libc::ENOSPC | libc::EDQUOT => return FsError::InsufficientStorage,
-                #[cfg(windows)]
-                libc::EMLINK | libc::ENOSPC => return FsError::InsufficientStorage,
                 libc::EFBIG => return FsError::TooLarge,
                 libc::EACCES | libc::EPERM => return FsError::Forbidden,
                 libc::ENOTEMPTY | libc::EEXIST => return FsError::Exists,
@@ -85,8 +85,15 @@ impl From<&std::io::Error> for FsError {
         }
         // generic mappings for leftover OS errors and errors with no OS code.
         match e.kind() {
+            ErrorKind::AlreadyExists | ErrorKind::DirectoryNotEmpty => FsError::Exists,
             ErrorKind::NotFound => FsError::NotFound,
-            ErrorKind::PermissionDenied => FsError::Forbidden,
+            ErrorKind::PermissionDenied
+            | ErrorKind::NotADirectory
+            | ErrorKind::IsADirectory
+            | ErrorKind::ReadOnlyFilesystem => FsError::Forbidden,
+            ErrorKind::StorageFull => FsError::InsufficientStorage,
+            ErrorKind::FileTooLarge => FsError::TooLarge,
+            ErrorKind::CrossesDevices => FsError::IsRemote,
             ErrorKind::Unsupported => FsError::NotImplemented,
             ErrorKind::InvalidInput => FsError::GeneralFailure,
             _ => FsError::GeneralFailure,
