@@ -700,7 +700,7 @@ pub(crate) fn calendar_busy_intervals(
 #[cfg(feature = "caldav")]
 fn event_occurrences_in_range(
     event: &icalendar::Event,
-    _calendar: &Calendar,
+    calendar: &Calendar,
     range_start: DateTime<Utc>,
     range_end: DateTime<Utc>,
 ) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
@@ -727,6 +727,22 @@ fn event_occurrences_in_range(
     let Ok(set) = event.get_recurrence() else {
         return base_span();
     };
+    let excluded: Vec<DateTime<Utc>> = match event.get_uid() {
+        Some(uid) => calendar
+            .components
+            .iter()
+            .filter_map(|comp| {
+                let CalendarComponent::Event(other) = comp else {
+                    return None;
+                };
+                if other.get_uid() != Some(uid) {
+                    return None;
+                }
+                other.get_recurrence_id().as_ref().map(to_utc)
+            })
+            .collect(),
+        None => Vec::new(),
+    };
     let tz = set.get_dt_start().timezone();
     let window_in_tz = |utc: DateTime<Utc>| {
         if tz.is_local() {
@@ -752,7 +768,10 @@ fn event_occurrences_in_range(
             };
             (start, start + duration)
         })
-        .filter(|(start, end)| time_spans_overlap(*start, *end, Some(range_start), Some(range_end)))
+        .filter(|(start, end)| {
+            !excluded.contains(start)
+                && time_spans_overlap(*start, *end, Some(range_start), Some(range_end))
+        })
         .collect()
 }
 
@@ -1474,6 +1493,28 @@ mod tests {
                     FreeBusyType::Busy
                 ))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn recurrence_id_overrides_replace_or_cancel_instances() {
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\n\
+BEGIN:VEVENT\nUID:1\nDTSTART:20240101T120000Z\nDTEND:20240101T130000Z\nRRULE:FREQ=DAILY;COUNT=4\nEND:VEVENT\n\
+BEGIN:VEVENT\nUID:1\nRECURRENCE-ID:20240102T120000Z\nDTSTART:20240102T150000Z\nDTEND:20240102T160000Z\nEND:VEVENT\n\
+BEGIN:VEVENT\nUID:1\nRECURRENCE-ID:20240103T120000Z\nDTSTART:20240103T120000Z\nDTEND:20240103T130000Z\nSTATUS:CANCELLED\nEND:VEVENT\n\
+END:VCALENDAR";
+        let cal = parse_ics(ics);
+        assert_eq!(
+            calendar_busy_intervals(
+                &cal,
+                parse_caldav_date_time("20240101T000000Z").unwrap(),
+                parse_caldav_date_time("20240201T000000Z").unwrap(),
+            ),
+            vec![
+                busy("20240101T120000Z", "20240101T130000Z", FreeBusyType::Busy),
+                busy("20240104T120000Z", "20240104T130000Z", FreeBusyType::Busy),
+                busy("20240102T150000Z", "20240102T160000Z", FreeBusyType::Busy),
+            ]
         );
     }
 
