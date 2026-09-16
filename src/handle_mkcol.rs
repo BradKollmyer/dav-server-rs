@@ -156,17 +156,28 @@ fn resourcetype_flags(tree: &Element) -> (bool, bool) {
         .filter(|e| e.name == "resourcetype")
         .flat_map(|e| e.child_elems_iter())
     {
-        #[cfg(feature = "caldav")]
-        if rt.name == "calendar" && rt.namespace.as_deref() == Some(crate::caldav::NS_CALDAV_URI) {
-            calendar = true;
-        }
-        #[cfg(feature = "carddav")]
-        if rt.name == "addressbook"
-            && rt.namespace.as_deref() == Some(crate::carddav::NS_CARDDAV_URI)
-        {
-            addressbook = true;
-        }
-        let _ = rt;
+        calendar |= is_calendar_resourcetype(rt);
+        addressbook |= is_addressbook_resourcetype(rt);
     }
     (calendar, addressbook)
+}
+
+#[cfg(feature = "caldav")]
+fn is_calendar_resourcetype(rt: &Element) -> bool {
+    rt.name == "calendar" && rt.namespace.as_deref() == Some(crate::caldav::NS_CALDAV_URI)
+}
+
+#[cfg(not(feature = "caldav"))]
+fn is_calendar_resourcetype(_rt: &Element) -> bool {
+    false
+}
+
+#[cfg(feature = "carddav")]
+fn is_addressbook_resourcetype(rt: &Element) -> bool {
+    rt.name == "addressbook" && rt.namespace.as_deref() == Some(crate::carddav::NS_CARDDAV_URI)
+}
+
+#[cfg(not(feature = "carddav"))]
+fn is_addressbook_resourcetype(_rt: &Element) -> bool {
+    false
 }

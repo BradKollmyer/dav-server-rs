@@ -23,9 +23,10 @@ use crate::fs::*;
 use crate::handle_lock::{list_lockdiscovery, list_supportedlock};
 use crate::ls::*;
 use crate::util::MemBuffer;
+#[cfg(feature = "proppatch")]
+use crate::util::httpdate_to_systemtime;
 use crate::util::{
-    dav_xml_error, httpdate_to_systemtime, systemtime_to_httpdate,
-    systemtime_to_rfc3339_without_nanosecond,
+    dav_xml_error, systemtime_to_httpdate, systemtime_to_rfc3339_without_nanosecond,
 };
 use crate::{DavInner, DavResult};
 

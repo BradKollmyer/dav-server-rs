@@ -62,6 +62,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
     /// Whether a listing (PROPFIND, REPORT) skips this entry: a dot-prefixed name
     /// under InListings/Always, or a symlink as seen through `get_read_dir_meta()`.
+    #[cfg(any(feature = "caldav", feature = "carddav"))]
     pub(crate) async fn hidden_in_listing(&self, dirent: &dyn DavDirEntry) -> bool {
         let hide_dot_prefix = self.hide_dot_prefix == DavOptionHide::InListings
             || self.hide_dot_prefix == DavOptionHide::Always;

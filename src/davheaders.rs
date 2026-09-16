@@ -200,6 +200,7 @@ impl Header for Depth {
 
 /// Rudimentary check whether `s` looks like a valid Content-Language
 /// value: a comma separated list of language tags.
+#[cfg(feature = "proppatch")]
 pub(crate) fn valid_content_language(s: &str) -> bool {
     if HeaderValue::from_str(s).is_err() {
         return false;
@@ -966,6 +967,7 @@ impl Header for If {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "proppatch")]
     #[test]
     fn content_language_validator() {
         assert!(valid_content_language("en"));

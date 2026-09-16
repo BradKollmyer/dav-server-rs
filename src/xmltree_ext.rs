@@ -34,6 +34,7 @@ pub(crate) trait ElementExt {
     /// Vec of the children that are Elements.
     fn take_child_elems(self) -> Vec<Element>;
     /// Does the element have children that are also Elements.
+    #[cfg(feature = "proppatch")]
     fn has_child_elems(&self) -> bool;
     /// Write the element using an EventWriter.
     fn write_ev<W: Write>(&self, emitter: &mut EventWriter<W>) -> xml::writer::Result<()>;
@@ -107,6 +108,7 @@ impl ElementExt for Element {
             .collect()
     }
 
+    #[cfg(feature = "proppatch")]
     fn has_child_elems(&self) -> bool {
         self.children.iter().find_map(|n| n.as_element()).is_some()
     }

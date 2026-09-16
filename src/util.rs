@@ -166,6 +166,7 @@ pub(crate) fn systemtime_to_httpdate(t: SystemTime) -> String {
     v[0].to_str().unwrap().to_owned()
 }
 
+#[cfg(feature = "proppatch")]
 pub(crate) fn httpdate_to_systemtime(s: &str) -> Option<SystemTime> {
     let v = http::HeaderValue::from_str(s.trim()).ok()?;
     let mut iter = std::iter::once(&v);
@@ -214,6 +215,7 @@ mod tests {
         assert!(systemtime_to_rfc3339_without_nanosecond(t) == "1970-01-01T00:00:01Z");
     }
 
+    #[cfg(feature = "proppatch")]
     #[test]
     fn test_httpdate_roundtrip() {
         let t = UNIX_EPOCH + std::time::Duration::from_secs(1_675_789_581);
