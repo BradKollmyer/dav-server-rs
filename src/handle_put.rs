@@ -176,7 +176,7 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                 .ok_or(DavError::StatusClose(SC::BAD_REQUEST))?;
             match r {
                 davheaders::XUpdateRange::FromTo(b, e) => {
-                    if b > e || e - b + 1 != count {
+                    if e.checked_sub(b).and_then(|n| n.checked_add(1)) != Some(count) {
                         return Err(DavError::StatusClose(SC::RANGE_NOT_SATISFIABLE));
                     }
                     start = b;
@@ -204,16 +204,17 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         match req.headers().typed_try_get::<headers::ContentRange>() {
             Ok(Some(range)) => {
                 if let Some((b, e)) = range.bytes_range() {
-                    if b > e {
-                        return Err(DavError::StatusClose(SC::RANGE_NOT_SATISFIABLE));
-                    }
+                    let range_len = e
+                        .checked_sub(b)
+                        .and_then(|n| n.checked_add(1))
+                        .ok_or(DavError::StatusClose(SC::RANGE_NOT_SATISFIABLE))?;
 
                     if have_count {
-                        if e - b + 1 != count {
+                        if range_len != count {
                             return Err(DavError::StatusClose(SC::RANGE_NOT_SATISFIABLE));
                         }
                     } else {
-                        count = e - b + 1;
+                        count = range_len;
                         have_count = true;
                     }
                     start = b;
