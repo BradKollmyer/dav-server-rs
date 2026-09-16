@@ -715,8 +715,12 @@ impl DavFileSystem for LocalFs {
                             .map(|m| m.is_dir())
                             .unwrap_or(false);
                         if e.raw_os_error() == Some(libc::ENOTDIR) && from_is_real_dir {
-                            // remove and try again.
-                            std::fs::remove_file(&topath)?;
+                            // Dest already gone is a race, not a missing source; retry.
+                            match std::fs::remove_file(&topath) {
+                                Ok(()) => {}
+                                Err(rm) if rm.kind() == io::ErrorKind::NotFound => {}
+                                Err(rm) => return Err(rm.into()),
+                            }
                             std::fs::rename(&frompath, &topath).map_err(|e| e.into())
                         } else {
                             Err(e.into())
