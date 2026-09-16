@@ -423,7 +423,9 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     }
                 };
 
-                if hide_dot_prefix && dirent.name().starts_with(b".") {
+                if Self::is_collection_marker(&dirent.name())
+                    || (hide_dot_prefix && dirent.name().starts_with(b"."))
+                {
                     continue;
                 }
 

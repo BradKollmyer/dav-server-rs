@@ -40,6 +40,13 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
 
     /// 404 hidden names and hidden symlinks. Missing paths are allowed so PUT/MKCOL can create.
     pub(crate) async fn ensure_visible(&self, path: &DavPath) -> DavResult<()> {
+        if path
+            .as_bytes()
+            .split(|b| *b == b'/')
+            .any(Self::is_collection_marker)
+        {
+            return Err(DavError::Status(StatusCode::NOT_FOUND));
+        }
         if (self.hide_dot_prefix == DavOptionHide::Always
             || self.hide_dot_prefix == DavOptionHide::ForDirectPaths)
             && path
@@ -74,10 +81,28 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         Ok(())
     }
 
+    /// Collection-type sidecars belong to the server, not the DAV namespace.
+    /// Reserve case variants too for case-insensitive filesystem backends.
+    pub(crate) fn is_collection_marker(name: &[u8]) -> bool {
+        #[cfg(feature = "caldav")]
+        if name.eq_ignore_ascii_case(b".dav-calendar") {
+            return true;
+        }
+        #[cfg(feature = "carddav")]
+        if name.eq_ignore_ascii_case(b".dav-addressbook") {
+            return true;
+        }
+        let _ = name;
+        false
+    }
+
     /// Whether a listing (PROPFIND, REPORT) skips this entry: a dot-prefixed name
     /// under InListings/Always, or a symlink as seen through `get_read_dir_meta()`.
     #[cfg(any(feature = "caldav", feature = "carddav"))]
     pub(crate) async fn hidden_in_listing(&self, dirent: &dyn DavDirEntry) -> bool {
+        if Self::is_collection_marker(&dirent.name()) {
+            return true;
+        }
         let hide_dot_prefix = self.hide_dot_prefix == DavOptionHide::InListings
             || self.hide_dot_prefix == DavOptionHide::Always;
         if hide_dot_prefix && dirent.name().starts_with(b".") {
@@ -432,6 +457,9 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
                     };
 
                     let mut name = dirent.name();
+                    if Self::is_collection_marker(&name) {
+                        continue;
+                    }
                     if hide_dot_prefix && name.starts_with(b".") {
                         continue;
                     }

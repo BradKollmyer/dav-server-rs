@@ -53,6 +53,11 @@ Optional [CalDAV][RFC4791] (`caldav` feature) and [CardDAV][RFC6352] (`carddav`
 feature) are partial implementations, not full RFC coverage. See
 [README.CalDAV.md](README.CalDAV.md) for CalDAV setup, queries, and limitations.
 
+When enabled, `.dav-calendar` and `.dav-addressbook` respectively are reserved
+server metadata names, including case variants. They are hidden from DAV
+requests and listings regardless of dotfile settings. Collection operations
+manage these markers internally.
+
 The litmus test suite also has tests for RFC3744 "acl" and "principal",
 RFC5842 "bind", and RFC3253 "versioning". Those we do not support right now.
 
