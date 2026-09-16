@@ -460,15 +460,13 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
     async fn typed_parent_collection(&self, path: &DavPath) -> Option<TypedCollection> {
         let parent = path.parent();
         let meta = self.fs.metadata(&parent, &self.credentials).await.ok()?;
-        #[cfg(feature = "caldav")]
-        if self.collection_is_calendar(&parent, meta.as_ref()).await {
-            return Some(TypedCollection::Calendar);
+        match self.collection_kind(&parent, meta.as_ref()).await {
+            #[cfg(feature = "caldav")]
+            CollectionKind::Calendar => Some(TypedCollection::Calendar),
+            #[cfg(feature = "carddav")]
+            CollectionKind::Addressbook => Some(TypedCollection::Addressbook),
+            CollectionKind::None => None,
         }
-        #[cfg(feature = "carddav")]
-        if self.collection_is_addressbook(&parent, meta.as_ref()).await {
-            return Some(TypedCollection::Addressbook);
-        }
-        None
     }
 
     #[cfg(any(feature = "caldav", feature = "carddav"))]

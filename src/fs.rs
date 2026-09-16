@@ -199,49 +199,82 @@ pub(crate) fn is_protected_type_marker(prop: &DavProp) -> bool {
     false
 }
 
-/// True if metadata or a stored CalDAV marker property says this is a calendar.
-#[cfg(feature = "caldav")]
-pub(crate) async fn meta_or_prop_is_calendar<C>(
-    fs: &dyn GuardedFileSystem<C>,
-    path: &DavPath,
-    meta: &dyn DavMetaData,
-    credentials: &C,
-) -> bool
-where
-    C: Clone + Send + Sync + 'static,
-{
-    meta.is_calendar(path) || has_type_marker(fs, path, credentials, is_calendar_type_marker).await
-}
-
-/// True if metadata or a stored CardDAV marker property says this is an address book.
-#[cfg(feature = "carddav")]
-pub(crate) async fn meta_or_prop_is_addressbook<C>(
-    fs: &dyn GuardedFileSystem<C>,
-    path: &DavPath,
-    meta: &dyn DavMetaData,
-    credentials: &C,
-) -> bool
-where
-    C: Clone + Send + Sync + 'static,
-{
-    meta.is_addressbook(path)
-        || has_type_marker(fs, path, credentials, is_addressbook_type_marker).await
-}
-
-/// True if a stored dead property of `path` satisfies `is_marker`.
+/// CalDAV / CardDAV type of a collection.
 #[cfg(any(feature = "caldav", feature = "carddav"))]
-async fn has_type_marker<C>(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CollectionKind {
+    /// A plain WebDAV resource.
+    None,
+    #[cfg(feature = "caldav")]
+    Calendar,
+    #[cfg(feature = "carddav")]
+    Addressbook,
+}
+
+#[cfg(any(feature = "caldav", feature = "carddav"))]
+impl CollectionKind {
+    /// Kind according to the filesystem's metadata.
+    pub(crate) fn from_meta(path: &DavPath, meta: &dyn DavMetaData) -> CollectionKind {
+        #[cfg(feature = "caldav")]
+        if meta.is_calendar(path) {
+            return CollectionKind::Calendar;
+        }
+        #[cfg(feature = "carddav")]
+        if meta.is_addressbook(path) {
+            return CollectionKind::Addressbook;
+        }
+        let _ = (path, meta);
+        CollectionKind::None
+    }
+
+    /// Kind according to a stored collection type marker property.
+    pub(crate) fn from_props(props: &[DavProp]) -> CollectionKind {
+        #[cfg(feature = "caldav")]
+        if props.iter().any(is_calendar_type_marker) {
+            return CollectionKind::Calendar;
+        }
+        #[cfg(feature = "carddav")]
+        if props.iter().any(is_addressbook_type_marker) {
+            return CollectionKind::Addressbook;
+        }
+        let _ = props;
+        CollectionKind::None
+    }
+
+    /// Kind according to metadata, falling back to the already fetched dead
+    /// properties of a directory.
+    pub(crate) fn from_meta_or_props(
+        path: &DavPath,
+        meta: &dyn DavMetaData,
+        props: &[DavProp],
+    ) -> CollectionKind {
+        match CollectionKind::from_meta(path, meta) {
+            CollectionKind::None if meta.is_dir() => CollectionKind::from_props(props),
+            kind => kind,
+        }
+    }
+}
+
+/// Resolve the collection kind from metadata first, and otherwise from the
+/// stored marker property, with at most one `get_props` call (directories only).
+#[cfg(any(feature = "caldav", feature = "carddav"))]
+pub(crate) async fn resolve_collection_kind<C>(
     fs: &dyn GuardedFileSystem<C>,
     path: &DavPath,
+    meta: &dyn DavMetaData,
     credentials: &C,
-    is_marker: fn(&DavProp) -> bool,
-) -> bool
+) -> CollectionKind
 where
     C: Clone + Send + Sync + 'static,
 {
-    match fs.get_props(path, false, credentials).await {
-        Ok(props) => props.iter().any(is_marker),
-        Err(_) => false,
+    match CollectionKind::from_meta(path, meta) {
+        CollectionKind::None if meta.is_dir() => {
+            match fs.get_props(path, false, credentials).await {
+                Ok(props) => CollectionKind::from_props(&props),
+                Err(_) => CollectionKind::None,
+            }
+        }
+        kind => kind,
     }
 }
 

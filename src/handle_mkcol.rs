@@ -82,14 +82,17 @@ impl<C: Clone + Send + Sync + 'static> DavInner<C> {
         #[cfg(any(feature = "caldav", feature = "carddav"))]
         {
             let parent = path.parent();
-            if let Ok(meta) = self.fs.metadata(&parent, &self.credentials).await {
-                #[cfg(feature = "caldav")]
-                if want_calendar && self.collection_is_calendar(&parent, meta.as_ref()).await {
-                    return Err(DavError::Status(StatusCode::FORBIDDEN));
-                }
-                #[cfg(feature = "carddav")]
-                if want_addressbook && self.collection_is_addressbook(&parent, meta.as_ref()).await
-                {
+            if (want_calendar || want_addressbook)
+                && let Ok(meta) = self.fs.metadata(&parent, &self.credentials).await
+            {
+                let nested = match self.collection_kind(&parent, meta.as_ref()).await {
+                    #[cfg(feature = "caldav")]
+                    CollectionKind::Calendar => want_calendar,
+                    #[cfg(feature = "carddav")]
+                    CollectionKind::Addressbook => want_addressbook,
+                    CollectionKind::None => false,
+                };
+                if nested {
                     return Err(DavError::Status(StatusCode::FORBIDDEN));
                 }
             }

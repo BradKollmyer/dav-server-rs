@@ -407,6 +407,16 @@ where
             .unwrap_or(false)
     }
 
+    /// CalDAV / CardDAV kind of a collection, from metadata or the stored marker property.
+    #[cfg(any(feature = "caldav", feature = "carddav"))]
+    pub(crate) async fn collection_kind(
+        &self,
+        path: &DavPath,
+        meta: &dyn DavMetaData,
+    ) -> CollectionKind {
+        resolve_collection_kind(self.fs.as_ref(), path, meta, &self.credentials).await
+    }
+
     /// True if metadata or a stored CalDAV marker property says this is a calendar.
     #[cfg(feature = "caldav")]
     pub(crate) async fn collection_is_calendar(
@@ -414,7 +424,7 @@ where
         path: &DavPath,
         meta: &dyn DavMetaData,
     ) -> bool {
-        meta_or_prop_is_calendar(self.fs.as_ref(), path, meta, &self.credentials).await
+        self.collection_kind(path, meta).await == CollectionKind::Calendar
     }
 
     /// True if metadata or a stored CardDAV marker property says this is an address book.
@@ -424,7 +434,7 @@ where
         path: &DavPath,
         meta: &dyn DavMetaData,
     ) -> bool {
-        meta_or_prop_is_addressbook(self.fs.as_ref(), path, meta, &self.credentials).await
+        self.collection_kind(path, meta).await == CollectionKind::Addressbook
     }
 
     // helper.

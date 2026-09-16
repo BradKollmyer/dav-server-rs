@@ -1740,20 +1740,33 @@ END:VCALENDAR"#
     }
 
     /// MemFs wrapper that keeps dead props but uses default `mark_calendar`
-    /// (metadata `is_calendar` stays false). When the flag is set,
-    /// `patch_props` refuses the CalDAV calendar marker with 403.
+    /// (metadata `is_calendar` stays false), and counts `get_props` calls.
+    /// When the flag is set, `patch_props` refuses the CalDAV calendar
+    /// marker with 403.
     #[cfg(feature = "proppatch")]
     #[derive(Clone)]
-    struct DeadPropCalFs(dav_server::memfs::MemFs, bool);
+    struct DeadPropCalFs(
+        dav_server::memfs::MemFs,
+        bool,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    );
 
     #[cfg(feature = "proppatch")]
     impl DeadPropCalFs {
         fn new() -> Box<Self> {
-            Box::new(Self(*dav_server::memfs::MemFs::new(), false))
+            Self::with_refusing_marker(false)
         }
 
         fn refusing_marker() -> Box<Self> {
-            Box::new(Self(*dav_server::memfs::MemFs::new(), true))
+            Self::with_refusing_marker(true)
+        }
+
+        fn with_refusing_marker(refuse: bool) -> Box<Self> {
+            Box::new(Self(
+                *dav_server::memfs::MemFs::new(),
+                refuse,
+                std::sync::Arc::default(),
+            ))
         }
     }
 
@@ -1836,6 +1849,7 @@ END:VCALENDAR"#
             path: &'a dav_server::davpath::DavPath,
             do_content: bool,
         ) -> dav_server::fs::FsFuture<'a, Vec<dav_server::fs::DavProp>> {
+            self.2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.0.get_props(path, do_content)
         }
 
@@ -2481,6 +2495,63 @@ END:VCALENDAR"#
             body_str.matches("FREEBUSY:").count(),
             1,
             "only the good event is busy: {body_str}"
+        );
+    }
+
+    /// A Depth:1 allprop PROPFIND resolves the collection type from the dead
+    /// properties it already fetches: exactly one `get_props` per resource.
+    #[cfg(feature = "proppatch")]
+    #[tokio::test]
+    async fn test_propfind_allprop_one_get_props_per_resource() {
+        use std::sync::atomic::Ordering;
+
+        let fs = DeadPropCalFs::new();
+        let get_props_calls = fs.2.clone();
+        let server = DavHandler::builder()
+            .filesystem(fs)
+            .locksystem(FakeLs::new())
+            .build_handler();
+        mkcol(&server, "/calendars").await;
+
+        let req = Request::builder()
+            .method("MKCALENDAR")
+            .uri("/calendars/prop-cal")
+            .body(Body::empty())
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        for uri in ["/calendars/a.txt", "/calendars/b.txt"] {
+            let req = Request::builder()
+                .method("PUT")
+                .uri(uri)
+                .body(Body::from("hello"))
+                .unwrap();
+            let resp = server.handle(req).await;
+            assert_eq!(resp.status(), StatusCode::CREATED, "PUT {uri}");
+        }
+
+        get_props_calls.store(0, Ordering::SeqCst);
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>"#;
+        let req = Request::builder()
+            .method("PROPFIND")
+            .uri("/calendars")
+            .header("Depth", "1")
+            .body(Body::from(propfind_body))
+            .unwrap();
+        let resp = server.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body_str = resp_to_string(resp).await;
+        assert!(
+            body_str.contains("<C:calendar"),
+            "prop-cal must still be reported as a calendar: {body_str}"
+        );
+        // /calendars, prop-cal, a.txt and b.txt.
+        assert_eq!(
+            get_props_calls.load(Ordering::SeqCst),
+            4,
+            "expected one get_props per resource"
         );
     }
 }

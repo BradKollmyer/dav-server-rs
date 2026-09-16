@@ -944,18 +944,6 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
         })
     }
 
-    /// True if metadata or a stored CalDAV marker property says this is a calendar.
-    #[cfg(feature = "caldav")]
-    async fn collection_is_calendar(&self, path: &DavPath, meta: &dyn DavMetaData) -> bool {
-        meta_or_prop_is_calendar(self.fs.as_ref(), path, meta, &self.credentials).await
-    }
-
-    /// True if metadata or a stored CardDAV marker property says this is an address book.
-    #[cfg(feature = "carddav")]
-    async fn collection_is_addressbook(&self, path: &DavPath, meta: &dyn DavMetaData) -> bool {
-        meta_or_prop_is_addressbook(self.fs.as_ref(), path, meta, &self.credentials).await
-    }
-
     async fn get_quota<'a>(&'a self, qc: &'a mut QuotaCache) -> FsResult<(u64, Option<u64>)> {
         // do lookup only once.
         match qc.q_state {
@@ -982,6 +970,7 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
         prop: &'a Element,
         path: &'a DavPath,
         meta: &'a dyn DavMetaData,
+        #[cfg(any(feature = "caldav", feature = "carddav"))] kind: CollectionKind,
         qc: &'a mut QuotaCache,
         docontent: bool,
     ) -> DavResult<StatusElement> {
@@ -999,19 +988,22 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                         let mut ns = xmltree::Namespace::empty();
                         let mut children = Vec::new();
 
-                        #[cfg(feature = "caldav")]
-                        if self.collection_is_calendar(path, meta).await {
-                            ns.put("C".to_string(), NS_CALDAV_URI.to_string());
-                            children.push(supported_report_elem("C", "calendar-query"));
-                            children.push(supported_report_elem("C", "calendar-multiget"));
-                            children.push(supported_report_elem("C", "free-busy-query"));
-                        }
-
-                        #[cfg(feature = "carddav")]
-                        if self.collection_is_addressbook(path, meta).await {
-                            ns.put("CARD".to_string(), NS_CARDDAV_URI.to_string());
-                            children.push(supported_report_elem("CARD", "addressbook-query"));
-                            children.push(supported_report_elem("CARD", "addressbook-multiget"));
+                        match kind {
+                            #[cfg(feature = "caldav")]
+                            CollectionKind::Calendar => {
+                                ns.put("C".to_string(), NS_CALDAV_URI.to_string());
+                                children.push(supported_report_elem("C", "calendar-query"));
+                                children.push(supported_report_elem("C", "calendar-multiget"));
+                                children.push(supported_report_elem("C", "free-busy-query"));
+                            }
+                            #[cfg(feature = "carddav")]
+                            CollectionKind::Addressbook => {
+                                ns.put("CARD".to_string(), NS_CARDDAV_URI.to_string());
+                                children.push(supported_report_elem("CARD", "addressbook-query"));
+                                children
+                                    .push(supported_report_elem("CARD", "addressbook-multiget"));
+                            }
+                            CollectionKind::None => {}
                         }
 
                         return Ok(StatusElement {
@@ -1073,16 +1065,19 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                             let dir = Element::new2("D:collection");
                             elem.children.push(XMLNode::Element(dir));
 
-                            #[cfg(feature = "caldav")]
-                            if self.collection_is_calendar(path, meta).await {
-                                let calendar = Element::new2("C:calendar");
-                                elem.children.push(XMLNode::Element(calendar));
-                            }
-
-                            #[cfg(feature = "carddav")]
-                            if self.collection_is_addressbook(path, meta).await {
-                                let addressbook = Element::new2("CARD:addressbook");
-                                elem.children.push(XMLNode::Element(addressbook));
+                            #[cfg(any(feature = "caldav", feature = "carddav"))]
+                            match kind {
+                                #[cfg(feature = "caldav")]
+                                CollectionKind::Calendar => {
+                                    let calendar = Element::new2("C:calendar");
+                                    elem.children.push(XMLNode::Element(calendar));
+                                }
+                                #[cfg(feature = "carddav")]
+                                CollectionKind::Addressbook => {
+                                    let addressbook = Element::new2("CARD:addressbook");
+                                    elem.children.push(XMLNode::Element(addressbook));
+                                }
+                                CollectionKind::None => {}
                             }
                         }
                         return Ok(StatusElement {
@@ -1162,7 +1157,7 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                         status: StatusCode::OK,
                         element: elem,
                     });
-                } else if self.collection_is_calendar(path, meta).await {
+                } else if kind == CollectionKind::Calendar {
                     match prop.name.as_str() {
                         "supported-calendar-component-set" => {
                             let components = vec![
@@ -1232,7 +1227,7 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                         status: StatusCode::OK,
                         element: elem,
                     });
-                } else if self.collection_is_addressbook(path, meta).await {
+                } else if kind == CollectionKind::Addressbook {
                     match prop.name.as_str() {
                         "supported-address-data" => {
                             let elem = create_supported_address_data();
@@ -1358,12 +1353,42 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
         // A HashMap<StatusCode, Vec<Element>> for the result.
         let mut props = HashMap::new();
 
-        // Get properties one-by-one
+        // Dead properties: allprop includes values, propname includes names.
+        // Named props in a specific `prop` request are fetched via build_prop.
         let do_content = self.name != "propname";
+        let dead_props = if self.name != "prop" && self.fs.have_props(path, &self.credentials).await
+        {
+            self.fs
+                .get_props(path, do_content, &self.credentials)
+                .await
+                .ok()
+        } else {
+            None
+        };
+
+        // Resolve the collection type once per resource, reusing the dead
+        // properties fetched above when we have them.
+        #[cfg(any(feature = "caldav", feature = "carddav"))]
+        let kind = match &dead_props {
+            Some(v) => CollectionKind::from_meta_or_props(path, &*meta, v),
+            None => {
+                resolve_collection_kind(self.fs.as_ref(), path, &*meta, &self.credentials).await
+            }
+        };
+
+        // Get properties one-by-one
         let mut qc = self.q_cache;
         for p in &self.props {
             let res = self
-                .build_prop(p, path, &*meta, &mut qc, do_content)
+                .build_prop(
+                    p,
+                    path,
+                    &*meta,
+                    #[cfg(any(feature = "caldav", feature = "carddav"))]
+                    kind,
+                    &mut qc,
+                    do_content,
+                )
                 .await?;
             // Specific `prop` requests must report 404 (and other non-OK)
             // for named properties that are not present.
@@ -1373,12 +1398,7 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
         }
         self.q_cache = qc;
 
-        // Dead properties: allprop includes values, propname includes names.
-        // Named props in a specific `prop` request are fetched via build_prop.
-        if self.name != "prop"
-            && self.fs.have_props(path, &self.credentials).await
-            && let Ok(v) = self.fs.get_props(path, do_content, &self.credentials).await
-        {
+        if let Some(v) = dead_props {
             let v = v.into_iter();
             #[cfg(any(feature = "caldav", feature = "carddav"))]
             let v = v.filter(|p| !is_protected_type_marker(p));
