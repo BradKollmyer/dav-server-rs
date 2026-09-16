@@ -832,26 +832,33 @@ fn component_matches_prop_filter<C: Component>(comp: &C, pf: &PropertyFilter) ->
     matches_prop_values(&props, pf)
 }
 
-/// Property exists (or is-not-defined). Any instance that satisfies optional
-/// text-match, time-range, and all param-filters is enough.
+/// Property exists (or is-not-defined). The optional text-match is applied
+/// over the values of every instance that satisfies the time-range and all
+/// param-filters, so `negate-condition` negates the property's match as a
+/// whole (RFC 4791 9.7.5) rather than each instance separately.
 #[cfg(feature = "caldav")]
 fn matches_prop_values(props: &[&Property], pf: &PropertyFilter) -> bool {
     if pf.is_not_defined {
         return props.is_empty();
     }
-    if props.is_empty() {
+    let candidates: Vec<&Property> = props
+        .iter()
+        .copied()
+        .filter(|prop| property_instance_matches(prop, pf))
+        .collect();
+    if candidates.is_empty() {
         return false;
     }
-    props.iter().any(|prop| property_instance_matches(prop, pf))
+    match &pf.text_match {
+        Some(tm) => tm.matches_any(candidates.iter().map(|prop| prop.value())),
+        None => true,
+    }
 }
 
+/// Time-range and param-filter checks for one instance; the caller applies
+/// text-match over the set of instances that pass.
 #[cfg(feature = "caldav")]
 fn property_instance_matches(prop: &Property, pf: &PropertyFilter) -> bool {
-    if let Some(tm) = &pf.text_match
-        && !text_matches_value(prop.value(), tm)
-    {
-        return false;
-    }
     if let Some(tr) = &pf.time_range
         && !property_overlaps_time_range(prop, tr)
     {
@@ -893,31 +900,8 @@ fn param_filter_matches(prop: &Property, pf: &ParameterFilter) -> bool {
         return false;
     };
     match &pf.text_match {
-        Some(tm) => text_matches_value(value, tm),
+        Some(tm) => tm.matches_any([value]),
         None => true,
-    }
-}
-
-#[cfg(feature = "caldav")]
-fn text_matches_value(value: &str, tm: &TextMatch) -> bool {
-    let case_insensitive = tm.collation.as_deref().is_none_or(|c| {
-        c.eq_ignore_ascii_case("i;ascii-casemap") || c.eq_ignore_ascii_case("i;unicode-casemap")
-    });
-    let (haystack, needle) = if case_insensitive {
-        (value.to_lowercase(), tm.text.to_lowercase())
-    } else {
-        (value.to_string(), tm.text.clone())
-    };
-    let matched = match tm.match_type.as_deref() {
-        Some("equals") => haystack == needle,
-        Some("starts-with") => haystack.starts_with(&needle),
-        Some("ends-with") => haystack.ends_with(&needle),
-        _ => haystack.contains(&needle),
-    };
-    if tm.negate_condition {
-        !matched
-    } else {
-        matched
     }
 }
 
@@ -1129,6 +1113,31 @@ mod tests {
                 FreeBusyType::Busy
             )]
         );
+    }
+
+    #[test]
+    fn prop_filter_negated_text_match_applies_to_all_instances() {
+        // RFC 4791 9.7.5: negate-condition negates the property's match as a
+        // whole, so an ATTENDEE that is present alongside others still fails.
+        let mut filter = vevent_filter();
+        filter.prop_filters.push(PropertyFilter {
+            name: "ATTENDEE".into(),
+            is_not_defined: false,
+            text_match: Some(TextMatch {
+                text: "mailto:a@example.com".into(),
+                match_type: Some("equals".into()),
+                negate_condition: true,
+                ..Default::default()
+            }),
+            time_range: None,
+            param_filters: Vec::new(),
+        });
+        let query = vcalendar_with(filter);
+
+        let with_a = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:1\nDTSTART:20240615T120000Z\nDTEND:20240615T130000Z\nSUMMARY:Both\nATTENDEE:mailto:a@example.com\nATTENDEE:mailto:b@example.com\nEND:VEVENT\nEND:VCALENDAR";
+        let without_a = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:2\nDTSTART:20240615T120000Z\nDTEND:20240615T130000Z\nSUMMARY:Only b\nATTENDEE:mailto:b@example.com\nATTENDEE:mailto:c@example.com\nEND:VEVENT\nEND:VCALENDAR";
+        assert!(!calendar_matches_query(with_a, &query));
+        assert!(calendar_matches_query(without_a, &query));
     }
 
     fn dav_path(p: &str) -> DavPath {

@@ -53,6 +53,38 @@ impl TextMatch {
             match_type: elem.attributes.get("match-type").cloned(),
         }
     }
+
+    /// Whether `value` matches this filter's text under its collation and
+    /// match type. `negate_condition` is not applied; see [`Self::matches_any`].
+    ///
+    /// `i;ascii-casemap`, `i;unicode-casemap` and an unspecified collation
+    /// compare case-insensitively; any other collation compares exactly. The
+    /// match type defaults to `contains`.
+    pub fn matches(&self, value: &str) -> bool {
+        let case_insensitive = self.collation.as_deref().is_none_or(|c| {
+            c.eq_ignore_ascii_case("i;ascii-casemap") || c.eq_ignore_ascii_case("i;unicode-casemap")
+        });
+        let (haystack, needle) = if case_insensitive {
+            (value.to_lowercase(), self.text.to_lowercase())
+        } else {
+            (value.to_string(), self.text.clone())
+        };
+        match self.match_type.as_deref() {
+            Some("equals") => haystack == needle,
+            Some("starts-with") => haystack.starts_with(&needle),
+            Some("ends-with") => haystack.ends_with(&needle),
+            _ => haystack.contains(&needle),
+        }
+    }
+
+    /// Whether any of `values` matches, with `negate_condition` applied to
+    /// that overall result rather than to each value (RFC 4791 9.7.5,
+    /// RFC 6352 10.5.4): a negated filter matches only when none of the
+    /// values match.
+    pub fn matches_any<'a>(&self, values: impl IntoIterator<Item = &'a str>) -> bool {
+        let any = values.into_iter().any(|v| self.matches(v));
+        any != self.negate_condition
+    }
 }
 
 /// Parameter filter for matching property parameters
@@ -183,5 +215,55 @@ mod tests {
             vec!["/a.ics".to_string(), "/b.ics".to_string()]
         );
         assert!(hrefs_from(&parse("<multiget/>")).is_empty());
+    }
+
+    fn tm(text: &str, match_type: Option<&str>, negate: bool) -> TextMatch {
+        TextMatch {
+            text: text.into(),
+            collation: None,
+            negate_condition: negate,
+            match_type: match_type.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn matches_applies_match_type_and_default_collation() {
+        assert!(tm("Ann", None, false).matches("hannah"));
+        assert!(tm("ann", Some("equals"), false).matches("ANN"));
+        assert!(!tm("ann", Some("equals"), false).matches("hannah"));
+        assert!(tm("han", Some("starts-with"), false).matches("Hannah"));
+        assert!(!tm("nah", Some("starts-with"), false).matches("Hannah"));
+        assert!(tm("nah", Some("ends-with"), false).matches("Hannah"));
+        assert!(!tm("han", Some("ends-with"), false).matches("Hannah"));
+    }
+
+    #[test]
+    fn matches_respects_collation() {
+        let mut octet = tm("ann", Some("equals"), false);
+        octet.collation = Some("i;octet".into());
+        assert!(!octet.matches("ANN"));
+        assert!(octet.matches("ann"));
+
+        let mut unicode = tm("ann", Some("equals"), false);
+        unicode.collation = Some("I;UNICODE-CASEMAP".into());
+        assert!(unicode.matches("ANN"));
+    }
+
+    #[test]
+    fn matches_ignores_negate_condition() {
+        assert!(tm("a", Some("equals"), true).matches("a"));
+    }
+
+    #[test]
+    fn matches_any_negates_over_the_whole_set() {
+        let positive = tm("a", Some("equals"), false);
+        assert!(positive.matches_any(["a", "b"]));
+        assert!(!positive.matches_any(["b", "c"]));
+        assert!(!positive.matches_any([]));
+
+        let negated = tm("a", Some("equals"), true);
+        assert!(!negated.matches_any(["a", "b"]));
+        assert!(negated.matches_any(["b", "c"]));
+        assert!(negated.matches_any([]));
     }
 }

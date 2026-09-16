@@ -187,7 +187,7 @@ fn vcard_matches_prop_filter(vcard: &VCard, pf: &PropertyFilter) -> bool {
             return false;
         }
         return match &pf.text_match {
-            Some(tm) => text_match_any(&values, tm),
+            Some(tm) => tm.matches_any(values.iter().map(String::as_str)),
             None => true,
         };
     }
@@ -210,7 +210,7 @@ fn vcard_entry_matches_prop_filter(entry: &VCardEntry, pf: &PropertyFilter) -> b
     match &pf.text_match {
         Some(tm) => {
             let values: Vec<String> = entry.values.iter().filter_map(vcard_value_text).collect();
-            text_match_any(&values, tm)
+            tm.matches_any(values.iter().map(String::as_str))
         }
         None => true,
     }
@@ -231,7 +231,7 @@ fn vcard_entry_matches_param_filter(entry: &VCardEntry, paf: &ParameterFilter) -
         return false;
     }
     match &paf.text_match {
-        Some(tm) => text_match_any(&values, tm),
+        Some(tm) => tm.matches_any(values.iter().map(String::as_str)),
         None => true,
     }
 }
@@ -251,30 +251,6 @@ fn vcard_value_text(value: &VCardValue) -> Option<String> {
 #[cfg(feature = "carddav")]
 fn vcard_param_value_text(value: &VCardParameterValue) -> String {
     value.clone().into_text().into_owned()
-}
-
-#[cfg(feature = "carddav")]
-fn text_match_any(values: &[String], tm: &TextMatch) -> bool {
-    let any = values.iter().any(|v| text_matches_core(v, tm));
-    if tm.negate_condition { !any } else { any }
-}
-
-#[cfg(feature = "carddav")]
-fn text_matches_core(value: &str, tm: &TextMatch) -> bool {
-    let case_insensitive = tm.collation.as_deref().is_none_or(|c| {
-        c.eq_ignore_ascii_case("i;ascii-casemap") || c.eq_ignore_ascii_case("i;unicode-casemap")
-    });
-    let (haystack, needle) = if case_insensitive {
-        (value.to_lowercase(), tm.text.to_lowercase())
-    } else {
-        (value.to_string(), tm.text.clone())
-    };
-    match tm.match_type.as_deref() {
-        Some("equals") => haystack == needle,
-        Some("starts-with") => haystack.starts_with(&needle),
-        Some("ends-with") => haystack.ends_with(&needle),
-        _ => haystack.contains(&needle),
-    }
 }
 
 /// Validate vCard data using the calcard crate
