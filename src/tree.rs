@@ -59,15 +59,26 @@ impl<K: Eq + Hash + Debug + Clone, D: Debug> Tree<K, D> {
 
     /// add a child node to an existing node.
     pub fn add_child(&mut self, parent: u64, key: K, data: D, overwrite: bool) -> FsResult<u64> {
-        {
+        // Determine up front whether this is an overwrite of an existing child
+        // so we can remove the old node instead of orphaning it in the map.
+        let existing = {
             let pnode = self.nodes.get(&parent).ok_or(FsError::NotFound)?;
-            if !overwrite && pnode.children.contains_key(&key) {
-                return Err(FsError::Exists);
+            match pnode.children.get(&key) {
+                Some(&old) => {
+                    if !overwrite {
+                        return Err(FsError::Exists);
+                    }
+                    Some(old)
+                }
+                None => None,
             }
+        };
+        if let Some(old) = existing {
+            // Overwriting replaces the whole subtree rooted at the old child.
+            self.delete_subtree(old).ok();
         }
         let id = self.new_node(parent, data);
-        let pnode = self.nodes.get_mut(&parent).unwrap();
-
+        let pnode = self.nodes.get_mut(&parent).ok_or(FsError::NotFound)?;
         pnode.children.insert(key, id);
         Ok(id)
     }
@@ -305,6 +316,19 @@ mod tests {
         assert_eq!(t.get_node(child).unwrap_err(), FsError::NotFound);
         assert_eq!(t.get_node(grandchild).unwrap_err(), FsError::NotFound);
         assert_eq!(t.get_child(ROOT_ID, &"a").unwrap_err(), FsError::NotFound);
+    }
+
+    #[test]
+    fn add_child_overwrite_does_not_orphan_old_node() {
+        let mut t = tree();
+        let old = t.add_child(ROOT_ID, "a", 1, false).unwrap();
+        let grandchild = t.add_child(old, "b", 2, false).unwrap();
+        // Overwrite "a": both the old node and its subtree must be freed.
+        let new = t.add_child(ROOT_ID, "a", 10, true).unwrap();
+        assert_eq!(t.get_node(old).unwrap_err(), FsError::NotFound);
+        assert_eq!(t.get_node(grandchild).unwrap_err(), FsError::NotFound);
+        assert_eq!(*t.get_node(new).unwrap(), 10);
+        assert_eq!(t.get_child(ROOT_ID, &"a").unwrap(), new);
     }
 
     #[cfg(feature = "memfs")]
