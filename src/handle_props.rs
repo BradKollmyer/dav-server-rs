@@ -1193,7 +1193,15 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                                 self.fs.get_props(path, docontent, &self.credentials).await
                             {
                                 for prop_item in props {
-                                    if prop_item.name.contains("calendar-description") {
+                                    // Match the exact property name (or a
+                                    // prefixed form like "C:calendar-description"),
+                                    // not merely any prop whose name contains it.
+                                    let bare = prop_item
+                                        .name
+                                        .rsplit(':')
+                                        .next()
+                                        .unwrap_or(&prop_item.name);
+                                    if bare == "calendar-description" {
                                         return Ok(StatusElement {
                                             status: StatusCode::OK,
                                             element: davprop_to_element(prop_item),
@@ -1250,7 +1258,12 @@ impl<C: Clone + Send + Sync + 'static> PropWriter<C> {
                                 self.fs.get_props(path, docontent, &self.credentials).await
                             {
                                 for prop_item in props {
-                                    if prop_item.name.contains("addressbook-description") {
+                                    let bare = prop_item
+                                        .name
+                                        .rsplit(':')
+                                        .next()
+                                        .unwrap_or(&prop_item.name);
+                                    if bare == "addressbook-description" {
                                         return Ok(StatusElement {
                                             status: StatusCode::OK,
                                             element: davprop_to_element(prop_item),
