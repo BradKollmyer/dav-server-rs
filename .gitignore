@@ -4,3 +4,5 @@ Cargo.lock
 .vscode
 src/xml
 .idea
+.DS_Store
+.serena
