@@ -61,12 +61,22 @@ mod dav_tests {
         let req = Request::builder()
             .method("PROPFIND")
             .uri("/normal_dir")
+            .header("Depth", "0")
             .body(Body::from(r#"<?xml version="1.0"?><a:propfind xmlns:a="DAV:"><a:prop><a:resourcetype/><a:getcontentlength/><a:getlastmodified/></a:prop></a:propfind>"#))
             .unwrap();
 
         let resp = server.handle(req).await;
         let content = resp_to_string(resp).await;
-        assert!(content.contains(r#"<D:resourcetype></D:resourcetype>"#));
+        // Omitted Depth is infinity, which this server rejects. Depth 0
+        // reaches resourcetype, and a directory includes D:collection.
+        assert!(
+            content.contains("<D:resourcetype>") && content.contains("<D:collection"),
+            "{content}"
+        );
+        assert!(
+            !content.contains("xmlns:a") && !content.contains("<a:"),
+            "{content}"
+        );
     }
 
     #[tokio::test]
